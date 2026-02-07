@@ -1,7 +1,7 @@
 # =============================================================================
 # Woodpecker CI/CD - Docker Compose Configuration
 # =============================================================================
-# Version: 0.0.11
+# Version: 0.0.12
 #
 # This file defines the Woodpecker CI server and agent containers.
 #
@@ -97,6 +97,7 @@ services:
       - "traefik.http.routers.woodpecker.rule=Host(`ci.sparkfn.io`)"
       - "traefik.http.routers.woodpecker.entrypoints=websecure"
       - "traefik.http.routers.woodpecker.tls.certresolver=myresolver"
+      - "traefik.http.routers.woodpecker.priority=100"
       - "traefik.http.services.woodpecker.loadbalancer.server.port=8000"
 
   # ---------------------------------------------------------------------------
@@ -161,6 +162,71 @@ services:
     labels:
       - "com.woodpecker.component=agent"
       - "com.woodpecker.version=v3"
+
+  # ---------------------------------------------------------------------------
+  # Webhook Handler
+  # ---------------------------------------------------------------------------
+  # Receives GitHub/GitLab/Gitea webhook events and routes them to Woodpecker.
+  # Scripts and config are bind-mounted so edits don't require a rebuild.
+  # Traefik routes https://ci.sparkfn.io/webhooks/* to this container.
+  # ---------------------------------------------------------------------------
+  webhook-handler:
+    build:
+      context: .
+      dockerfile: docker/webhook-handler/Dockerfile
+    container_name: webhook-handler
+    restart: unless-stopped
+
+    depends_on:
+      woodpecker-server:
+        condition: service_healthy
+
+    volumes:
+      # Scripts and config (read-only — edit on host, no rebuild needed)
+      - ./scripts:/app/scripts:ro
+      - ./config:/app/config:ro
+      # Logs (writable)
+      - ./data/logs/webhook:/var/log
+
+    environment:
+      - WEBHOOK_PORT=${WEBHOOK_PORT:-9000}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WOODPECKER_SERVER=http://woodpecker-server:8000
+      - WOODPECKER_TOKEN=${WOODPECKER_TOKEN}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - WEBHOOK_LOG=/var/log/webhook-handler.log
+      - VERBOSE=${WEBHOOK_VERBOSE:-false}
+
+    networks:
+      - traefik
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 32M
+
+    labels:
+      - "com.woodpecker.component=webhook-handler"
+      - "com.woodpecker.version=v3"
+      # Traefik reverse proxy — route /webhooks to this container
+      - "traefik.enable=true"
+      - "traefik.http.routers.webhook-handler.rule=Host(`ci.sparkfn.io`) && PathPrefix(`/webhooks`)"
+      - "traefik.http.routers.webhook-handler.priority=200"
+      - "traefik.http.routers.webhook-handler.entrypoints=websecure"
+      - "traefik.http.routers.webhook-handler.tls.certresolver=myresolver"
+      # Strip /webhooks prefix so the container sees /health, /webhook, etc.
+      - "traefik.http.middlewares.webhook-strip.stripprefix.prefixes=/webhooks"
+      - "traefik.http.routers.webhook-handler.middlewares=webhook-strip"
+      - "traefik.http.services.webhook-handler.loadbalancer.server.port=9000"
 
 # =============================================================================
 # Networks
