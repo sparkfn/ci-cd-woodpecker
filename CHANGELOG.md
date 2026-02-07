@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-02-07
+
+### Fixed
+- Agent healthcheck: use `/bin/woodpecker-agent ping` instead of `pgrep` (distroless image)
+
+### Validated
+- End-to-end pipeline for `whatsappWebJs_api` trial (install → wait-for-db → test → build)
+- Pipeline failure notification: auto-creates GitHub issue on both API and frontend repos
+- `notify-failure` step correctly skips on success, triggers on failure
+
 ## [0.0.10] - 2026-02-07
 
 ### Fixed
