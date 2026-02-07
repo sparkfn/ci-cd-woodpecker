@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9] - 2026-02-07
+
+### Added
+- **Server Deployment with Traefik Integration**
+  - Updated `docker-compose.yml` with production ports (8090/9090)
+  - Traefik reverse proxy labels for `ci.sparkfn.io` with HTTPS
+  - Connected to external `traefik` network
+  - Configurable `WOODPECKER_OPEN` for initial setup
+  - Created `data/woodpecker/` and `data/logs/` subdirectories
+
+### Changed
+- Default host port from 8000 → 8090 (avoids conflict with existing services)
+- Default gRPC port from 9000 → 9090
+- Updated `.env.example` with new port defaults and host URL
+
+### Infrastructure
+- Closes #1
+
 ## [0.0.8] - 2026-02-07
 
 ### Added
