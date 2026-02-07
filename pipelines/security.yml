@@ -1,0 +1,283 @@
+# =============================================================================
+# Security Scanning Pipeline (Trivy)
+# =============================================================================
+# This pipeline integrates Trivy for comprehensive security scanning:
+# - Container image vulnerabilities
+# - Filesystem/dependency vulnerabilities
+# - Infrastructure as Code (IaC) misconfigurations
+# - Secret detection
+#
+# Usage: Include this pipeline in your Woodpecker configuration or reference
+#        specific steps as needed.
+#
+# Trivy: https://github.com/aquasecurity/trivy
+# Version: 0.0.5
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  - &trivy_image "aquasec/trivy:latest"
+  - &severity_threshold "HIGH,CRITICAL"  # Fail on HIGH or CRITICAL
+  - &exit_code_on_vuln "1"               # Exit code when vulnerabilities found
+
+# -----------------------------------------------------------------------------
+# Clone Configuration
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 1
+      tags: false
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Trivy DB Update - Download/update vulnerability database
+  # ---------------------------------------------------------------------------
+  trivy-db-update:
+    image: *trivy_image
+    commands:
+      - echo "📥 Updating Trivy vulnerability database..."
+      - trivy image --download-db-only
+      - echo "✅ Database updated"
+    when:
+      - event: [push, pull_request, cron, manual]
+
+  # ---------------------------------------------------------------------------
+  # Filesystem Scan - Scan source code and dependencies
+  # ---------------------------------------------------------------------------
+  scan-filesystem:
+    image: *trivy_image
+    commands:
+      - echo "🔍 Scanning filesystem for vulnerabilities..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      # Scan with configuration file if present, otherwise use defaults
+      - |
+        if [ -f "config/trivy.yaml" ]; then
+          trivy fs --config config/trivy.yaml .
+        else
+          trivy fs \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            --format table \
+            --ignorefile .trivyignore \
+            .
+        fi
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "✅ Filesystem scan complete"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Dependency Scan - Focus on package vulnerabilities
+  # ---------------------------------------------------------------------------
+  scan-dependencies:
+    image: *trivy_image
+    commands:
+      - echo "📦 Scanning dependencies for vulnerabilities..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      # Scan lock files specifically
+      - |
+        trivy fs \
+          --scanners vuln \
+          --severity HIGH,CRITICAL \
+          --exit-code 0 \
+          --format table \
+          --pkg-types os,library \
+          .
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "✅ Dependency scan complete"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Secret Scan - Detect hardcoded secrets
+  # ---------------------------------------------------------------------------
+  scan-secrets:
+    image: *trivy_image
+    commands:
+      - echo "🔐 Scanning for hardcoded secrets..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - |
+        trivy fs \
+          --scanners secret \
+          --exit-code 1 \
+          --format table \
+          --secret-config config/trivy-secret.yaml \
+          . || echo "⚠️ Secrets found! Review above output."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # IaC Scan - Terraform, Kubernetes, Docker misconfigurations
+  # ---------------------------------------------------------------------------
+  scan-iac:
+    image: *trivy_image
+    commands:
+      - echo "🏗️ Scanning Infrastructure as Code..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - |
+        trivy config \
+          --severity HIGH,CRITICAL \
+          --exit-code 0 \
+          --format table \
+          . || echo "ℹ️ No IaC files found or scan complete"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "✅ IaC scan complete"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: [push, pull_request]
+      - path:
+          include:
+            - "*.tf"
+            - "*.yaml"
+            - "*.yml"
+            - "Dockerfile*"
+            - "docker-compose*.yml"
+            - "k8s/**"
+            - "kubernetes/**"
+            - "helm/**"
+
+  # ---------------------------------------------------------------------------
+  # Docker Image Scan - Scan built container images
+  # ---------------------------------------------------------------------------
+  scan-docker-image:
+    image: *trivy_image
+    commands:
+      - echo "🐳 Scanning Docker image for vulnerabilities..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      # Scan the image (requires image to be built or pulled)
+      - |
+        IMAGE="${CI_REPO_OWNER}/${CI_REPO_NAME}:${CI_COMMIT_SHA:0:8}"
+        if docker image inspect "$IMAGE" > /dev/null 2>&1; then
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            --format table \
+            --ignore-unfixed \
+            "$IMAGE"
+        else
+          echo "ℹ️ Image $IMAGE not found, skipping..."
+        fi
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "✅ Docker image scan complete"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: push
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # SBOM Generation - Software Bill of Materials
+  # ---------------------------------------------------------------------------
+  generate-sbom:
+    image: *trivy_image
+    commands:
+      - echo "📋 Generating Software Bill of Materials (SBOM)..."
+      - mkdir -p reports
+      # Generate SBOM in CycloneDX format
+      - |
+        trivy fs \
+          --format cyclonedx \
+          --output reports/sbom.json \
+          .
+      - echo "✅ SBOM generated: reports/sbom.json"
+      # Also generate SPDX format
+      - |
+        trivy fs \
+          --format spdx-json \
+          --output reports/sbom-spdx.json \
+          .
+      - echo "✅ SBOM (SPDX) generated: reports/sbom-spdx.json"
+    depends_on:
+      - trivy-db-update
+    when:
+      - event: push
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # Security Report - Generate comprehensive report
+  # ---------------------------------------------------------------------------
+  security-report:
+    image: *trivy_image
+    commands:
+      - echo "📊 Generating security report..."
+      - mkdir -p reports
+      # Generate JSON report for processing
+      - |
+        trivy fs \
+          --format json \
+          --output reports/security-report.json \
+          --severity LOW,MEDIUM,HIGH,CRITICAL \
+          .
+      # Generate HTML report for human review
+      - |
+        trivy fs \
+          --format template \
+          --template "@/contrib/html.tpl" \
+          --output reports/security-report.html \
+          . || echo "HTML template not available, JSON report only"
+      - echo "📁 Reports generated in reports/ directory"
+      - ls -la reports/
+    depends_on:
+      - scan-filesystem
+      - scan-dependencies
+      - scan-secrets
+    when:
+      - event: [push, pull_request]
+
+  # ---------------------------------------------------------------------------
+  # Gate - Fail pipeline if critical vulnerabilities found
+  # ---------------------------------------------------------------------------
+  security-gate:
+    image: *trivy_image
+    commands:
+      - echo "🚨 Security Gate - Checking for blocking vulnerabilities..."
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      # This step WILL fail if HIGH/CRITICAL vulnerabilities exist
+      - |
+        trivy fs \
+          --severity HIGH,CRITICAL \
+          --exit-code 1 \
+          --format table \
+          --ignore-unfixed \
+          --ignorefile .trivyignore \
+          . && echo "✅ Security gate passed - no blocking vulnerabilities" \
+          || (echo "❌ Security gate FAILED - blocking vulnerabilities found!" && exit 1)
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    depends_on:
+      - security-report
+    when:
+      - event: pull_request
+      # Only enforce gate on PRs, allow main to continue for reporting
+
+  # ---------------------------------------------------------------------------
+  # Notify - Security scan results
+  # ---------------------------------------------------------------------------
+  notify-security-complete:
+    image: alpine:latest
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "🔒 Security Scan Complete"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Repository: ${CI_REPO}"
+      - echo "Commit: ${CI_COMMIT_SHA:0:8}"
+      - echo "Reports saved to: reports/"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    depends_on:
+      - security-report
+    when:
+      - status: [success, failure]

@@ -1,0 +1,361 @@
+# =============================================================================
+# AI Auto-fix Configuration
+# =============================================================================
+# Configuration for the AI-powered automatic fix system.
+# This file controls how the AI coding agents attempt to fix CI/CD failures.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# General Settings
+# -----------------------------------------------------------------------------
+general:
+  # Enable/disable AI auto-fix globally
+  enabled: true
+
+  # Maximum number of fix attempts per failure
+  max_attempts: 3
+
+  # Timeout for each AI fix attempt (seconds)
+  timeout: 300
+
+  # Cooldown between fix attempts (seconds)
+  cooldown: 10
+
+  # Verify fix by running tests before committing
+  verify_before_commit: true
+
+  # Create backup branch before applying fix
+  create_backup: true
+
+  # Backup branch naming pattern
+  backup_branch_pattern: "backup/{branch}/{timestamp}"
+
+# -----------------------------------------------------------------------------
+# AI Provider Configuration
+# -----------------------------------------------------------------------------
+providers:
+  # -------------------------
+  # Claude Code (Anthropic)
+  # -------------------------
+  claude-code:
+    # Enable this provider
+    enabled: true
+
+    # Priority (lower = higher priority)
+    priority: 1
+
+    # Model to use
+    model: "claude-sonnet-4-20250514"
+
+    # Maximum tokens for response
+    max_tokens: 4096
+
+    # Temperature (0.0 = deterministic, 1.0 = creative)
+    temperature: 0.1
+
+    # Use Claude Code CLI if available
+    prefer_cli: true
+
+    # CLI options when using Claude Code CLI
+    cli_options:
+      dangerously_skip_permissions: true
+
+    # API configuration (fallback when CLI not available)
+    api:
+      base_url: "https://api.anthropic.com/v1"
+      version: "2023-06-01"
+
+    # Capabilities this provider is good at
+    capabilities:
+      - code_fix
+      - test_fix
+      - security_fix
+      - refactoring
+
+  # -------------------------
+  # OpenAI Codex / GPT-4
+  # -------------------------
+  codex:
+    enabled: true
+    priority: 2
+    model: "gpt-4-turbo-preview"
+    max_tokens: 4096
+    temperature: 0.1
+
+    api:
+      base_url: "https://api.openai.com/v1"
+
+    capabilities:
+      - code_fix
+      - test_fix
+      - documentation
+
+  # -------------------------
+  # OpenHands (formerly OpenDevin)
+  # -------------------------
+  openhands:
+    enabled: false
+    priority: 3
+
+    # Run mode: docker | local | api
+    mode: docker
+
+    # Docker image
+    docker_image: "ghcr.io/all-hands-ai/openhands:latest"
+
+    # Local model (if using local mode)
+    local_model: null
+
+    # Workspace mount path
+    workspace_mount: "/workspace"
+
+    capabilities:
+      - code_fix
+      - test_fix
+      - file_operations
+      - shell_commands
+
+  # -------------------------
+  # OpenCode (CLI Agent)
+  # -------------------------
+  opencode:
+    enabled: false
+    priority: 4
+
+    # CLI binary path (if not in PATH)
+    binary_path: null
+
+    capabilities:
+      - code_fix
+      - test_fix
+
+# -----------------------------------------------------------------------------
+# Fix Strategies
+# -----------------------------------------------------------------------------
+strategies:
+  # Strategy for test failures
+  test_failure:
+    # Providers to try (in order)
+    providers:
+      - claude-code
+      - codex
+
+    # Custom prompt additions
+    prompt_additions: |
+      Focus on fixing the failing test cases.
+      Do not modify test assertions unless they are clearly incorrect.
+      Prefer fixing the implementation over changing tests.
+
+    # Files to include in context
+    include_patterns:
+      - "**/*.test.*"
+      - "**/*.spec.*"
+      - "**/test/**"
+      - "**/tests/**"
+      - "**/__tests__/**"
+
+    # Files to exclude from modifications
+    exclude_patterns:
+      - "node_modules/**"
+      - "vendor/**"
+      - ".git/**"
+
+  # Strategy for security vulnerabilities
+  security_scan:
+    providers:
+      - claude-code
+
+    prompt_additions: |
+      This is a security vulnerability fix.
+      Be extra careful not to introduce new vulnerabilities.
+      Follow security best practices for this language/framework.
+      Update dependencies if that's the root cause.
+
+    include_patterns:
+      - "package.json"
+      - "package-lock.json"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "go.mod"
+      - "go.sum"
+      - "requirements.txt"
+      - "pyproject.toml"
+
+    # Maximum severity to auto-fix (critical, high, medium, low)
+    max_auto_fix_severity: high
+
+  # Strategy for lint/format errors
+  lint_error:
+    providers:
+      - codex
+      - claude-code
+
+    prompt_additions: |
+      Fix the linting/formatting errors.
+      Follow the project's style guide if available.
+      Run the linter/formatter after fixing to verify.
+
+    include_patterns:
+      - "**/*.js"
+      - "**/*.ts"
+      - "**/*.py"
+      - "**/*.go"
+      - "**/*.rs"
+
+  # Strategy for build failures
+  build_failure:
+    providers:
+      - claude-code
+      - codex
+
+    prompt_additions: |
+      Fix the build error.
+      Check for missing imports, type errors, or syntax issues.
+      Ensure all dependencies are correctly specified.
+
+    include_patterns:
+      - "**/*"
+
+    exclude_patterns:
+      - "node_modules/**"
+      - "vendor/**"
+      - "target/**"
+      - "dist/**"
+      - "build/**"
+
+# -----------------------------------------------------------------------------
+# Context Configuration
+# -----------------------------------------------------------------------------
+context:
+  # Maximum files to include in AI context
+  max_files: 50
+
+  # Maximum total context size (characters)
+  max_context_size: 100000
+
+  # Always include these files if they exist
+  always_include:
+    - "README.md"
+    - "package.json"
+    - "Cargo.toml"
+    - "go.mod"
+    - "pyproject.toml"
+
+  # Patterns for files that contain important context
+  important_patterns:
+    - "**/config/**"
+    - "**/*.config.*"
+    - ".eslintrc*"
+    - ".prettierrc*"
+    - "tsconfig.json"
+
+# -----------------------------------------------------------------------------
+# Git Configuration
+# -----------------------------------------------------------------------------
+git:
+  # Branch naming pattern for fix branches
+  branch_pattern: "ai-fix/{issue}/{timestamp}"
+
+  # Commit message pattern
+  commit_message_pattern: "fix: AI auto-fix for {issue_type}"
+
+  # Include issue reference in commit
+  include_issue_reference: true
+
+  # Push to remote after fix
+  push_to_remote: true
+
+  # Remote name
+  remote: "origin"
+
+  # Author for commits
+  author:
+    name: "AI Auto-fix Bot"
+    email: "ai-fix-bot@woodpecker.local"
+
+# -----------------------------------------------------------------------------
+# Notification Configuration
+# -----------------------------------------------------------------------------
+notifications:
+  # Notify on successful fix
+  on_success:
+    enabled: true
+    channels:
+      - github_comment
+      - slack  # if configured
+
+    message_template: |
+      🤖 **AI Auto-fix Successful**
+
+      The automated fix has been applied and verified.
+
+      - **Provider:** {provider}
+      - **Attempt:** {attempt}/{max_attempts}
+      - **Branch:** `{branch}`
+      - **PR:** #{pr_number}
+
+  # Notify on failed fix
+  on_failure:
+    enabled: true
+    channels:
+      - github_comment
+      - slack
+
+    message_template: |
+      ⚠️ **AI Auto-fix Failed**
+
+      The automated fix attempt was unsuccessful after {max_attempts} attempts.
+
+      - **Provider:** {provider}
+      - **Error:** {error_summary}
+
+      Manual intervention is required.
+
+# -----------------------------------------------------------------------------
+# Safety & Limits
+# -----------------------------------------------------------------------------
+safety:
+  # Maximum file changes per fix
+  max_files_changed: 20
+
+  # Maximum lines changed per fix
+  max_lines_changed: 500
+
+  # Require human approval for large changes
+  require_approval_threshold:
+    files: 10
+    lines: 200
+
+  # Never modify these files automatically
+  protected_files:
+    - ".env"
+    - ".env.*"
+    - "**/secrets/**"
+    - "**/credentials/**"
+    - "**/*.pem"
+    - "**/*.key"
+
+  # Rollback if tests fail after fix
+  auto_rollback_on_test_failure: true
+
+  # Create GitHub issue if fix fails
+  create_issue_on_failure: true
+
+# -----------------------------------------------------------------------------
+# Logging & Debugging
+# -----------------------------------------------------------------------------
+logging:
+  # Log level: debug, info, warn, error
+  level: info
+
+  # Log format: json, text
+  format: json
+
+  # Save AI prompts and responses for debugging
+  save_interactions: true
+
+  # Path to save interaction logs
+  interactions_path: "/tmp/ai-fix-interactions"
+
+  # Retention period for logs (days)
+  retention_days: 30

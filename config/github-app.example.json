@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "GitHub App Configuration for Woodpecker CI - Version 0.0.3",
+  
+  "app_id": "YOUR_GITHUB_APP_ID",
+  "app_name": "Woodpecker CI",
+  "private_key_path": "/config/github-app-private-key.pem",
+  
+  "webhook": {
+    "url": "https://your-woodpecker-host.com/hook",
+    "secret": "YOUR_WEBHOOK_SECRET",
+    "content_type": "json"
+  },
+  
+  "permissions": {
+    "$comment": "Required permissions for Woodpecker CI to function properly",
+    "repository": {
+      "contents": "read & write",
+      "metadata": "read-only",
+      "pull_requests": "read & write",
+      "commit_statuses": "read & write",
+      "checks": "read & write",
+      "issues": "read & write"
+    },
+    "organization": {
+      "members": "read-only"
+    }
+  },
+  
+  "events": {
+    "$comment": "Webhook events the app should subscribe to",
+    "subscribe": [
+      "push",
+      "pull_request",
+      "pull_request_review",
+      "create",
+      "delete",
+      "check_run",
+      "check_suite"
+    ]
+  },
+  
+  "installation": {
+    "$comment": "After creating the app, install it on your repositories",
+    "install_url": "https://github.com/settings/apps/YOUR_APP_NAME/installations",
+    "target_type": "organization",
+    "target_name": "YOUR_ORG_OR_USER",
+    "repositories": [
+      "repo-1",
+      "repo-2"
+    ]
+  },
+  
+  "oauth": {
+    "$comment": "OAuth settings if using OAuth flow alongside GitHub App",
+    "client_id": "YOUR_OAUTH_CLIENT_ID",
+    "client_secret": "YOUR_OAUTH_CLIENT_SECRET",
+    "callback_url": "http://localhost:8000/authorize"
+  },
+  
+  "metadata": {
+    "created_at": "2026-01-01T00:00:00Z",
+    "created_by": "your-github-username",
+    "notes": "Add any deployment-specific notes here"
+  }
+}

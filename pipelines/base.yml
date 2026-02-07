@@ -1,0 +1,222 @@
+# =============================================================================
+# Base Woodpecker Pipeline Template
+# =============================================================================
+# This is a reusable base pipeline that can be extended by other pipelines.
+# It provides common steps for building, testing, and deploying applications.
+#
+# Usage: Reference this file from your project's .woodpecker.yml or include
+#        specific steps as needed.
+#
+# Version: 0.0.4
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Variables (Override these in your project's pipeline)
+# -----------------------------------------------------------------------------
+variables:
+  - &default_image "woodpeckerci/plugin-docker-buildx:4"
+  - &node_image "node:20-alpine"
+  - &python_image "python:3.12-slim"
+  - &go_image "golang:1.22-alpine"
+
+# -----------------------------------------------------------------------------
+# Clone Configuration
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 50
+      tags: true
+
+# -----------------------------------------------------------------------------
+# Common Step Templates (YAML Anchors)
+# -----------------------------------------------------------------------------
+
+# Base step configuration with common settings
+.base_step: &base_step
+  when:
+    - event: [push, pull_request, tag, manual]
+
+# Only run on main/master branch
+.main_only: &main_only
+  when:
+    - event: push
+      branch: [main, master]
+
+# Only run on pull requests
+.pr_only: &pr_only
+  when:
+    - event: pull_request
+
+# Only run on tags (releases)
+.tag_only: &tag_only
+  when:
+    - event: tag
+
+# Skip CI condition (check commit message)
+.skip_ci: &skip_ci
+  when:
+    - evaluate: 'not (CI_COMMIT_MESSAGE contains "[skip ci]" or CI_COMMIT_MESSAGE contains "[ci skip]")'
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Validation Step - Runs first to validate configuration
+  # ---------------------------------------------------------------------------
+  validate:
+    <<: *base_step
+    image: alpine:latest
+    commands:
+      - echo "🔍 Validating pipeline configuration..."
+      - echo "Repository: ${CI_REPO}"
+      - echo "Branch: ${CI_COMMIT_BRANCH}"
+      - echo "Commit: ${CI_COMMIT_SHA:0:8}"
+      - echo "Event: ${CI_PIPELINE_EVENT}"
+      - echo "✅ Validation complete"
+
+  # ---------------------------------------------------------------------------
+  # Install Dependencies - Generic step for package installation
+  # ---------------------------------------------------------------------------
+  install:
+    <<: *base_step
+    image: *node_image
+    commands:
+      # Detect package manager and install dependencies
+      - |
+        if [ -f "package-lock.json" ]; then
+          echo "📦 Installing with npm..."
+          npm ci
+        elif [ -f "yarn.lock" ]; then
+          echo "📦 Installing with yarn..."
+          yarn install --frozen-lockfile
+        elif [ -f "pnpm-lock.yaml" ]; then
+          echo "📦 Installing with pnpm..."
+          npm install -g pnpm && pnpm install --frozen-lockfile
+        elif [ -f "requirements.txt" ]; then
+          echo "📦 Installing Python dependencies..."
+          pip install -r requirements.txt
+        elif [ -f "go.mod" ]; then
+          echo "📦 Installing Go dependencies..."
+          go mod download
+        else
+          echo "⚠️ No recognized package manager found"
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Lint Step - Code quality checks
+  # ---------------------------------------------------------------------------
+  lint:
+    <<: *base_step
+    image: *node_image
+    commands:
+      - echo "🔍 Running linters..."
+      - |
+        if [ -f "package.json" ]; then
+          npm run lint --if-present || echo "No lint script found"
+        fi
+      - echo "✅ Lint complete"
+    depends_on:
+      - install
+
+  # ---------------------------------------------------------------------------
+  # Test Step - Run unit tests
+  # ---------------------------------------------------------------------------
+  test:
+    <<: *base_step
+    image: *node_image
+    commands:
+      - echo "🧪 Running tests..."
+      - |
+        if [ -f "package.json" ]; then
+          npm test --if-present || echo "No test script found"
+        elif [ -f "pytest.ini" ] || [ -f "pyproject.toml" ]; then
+          pytest -v
+        elif [ -f "go.mod" ]; then
+          go test -v ./...
+        fi
+      - echo "✅ Tests complete"
+    depends_on:
+      - install
+
+  # ---------------------------------------------------------------------------
+  # Build Step - Compile/build the application
+  # ---------------------------------------------------------------------------
+  build:
+    <<: *base_step
+    image: *node_image
+    commands:
+      - echo "🏗️ Building application..."
+      - |
+        if [ -f "package.json" ]; then
+          npm run build --if-present || echo "No build script found"
+        elif [ -f "Makefile" ]; then
+          make build
+        elif [ -f "go.mod" ]; then
+          go build -o ./bin/app ./...
+        fi
+      - echo "✅ Build complete"
+    depends_on:
+      - test
+      - lint
+
+  # ---------------------------------------------------------------------------
+  # Docker Build Step - Build container image
+  # ---------------------------------------------------------------------------
+  docker-build:
+    <<: *main_only
+    image: *default_image
+    settings:
+      repo: ${CI_REPO}
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+      dockerfile: Dockerfile
+      dry_run: true  # Set to false when ready to push
+    depends_on:
+      - build
+    when:
+      - event: push
+        branch: [main, master]
+        path:
+          include: ["Dockerfile", "src/**", "package.json"]
+
+  # ---------------------------------------------------------------------------
+  # Notify Step - Send notifications on completion
+  # ---------------------------------------------------------------------------
+  notify-success:
+    image: alpine:latest
+    commands:
+      - echo "✅ Pipeline completed successfully!"
+      - echo "Repository: ${CI_REPO}"
+      - echo "Branch: ${CI_COMMIT_BRANCH}"
+      - echo "Commit: ${CI_COMMIT_SHA:0:8}"
+    depends_on:
+      - build
+    when:
+      - status: success
+
+  notify-failure:
+    image: alpine:latest
+    commands:
+      - echo "❌ Pipeline failed!"
+      - echo "Repository: ${CI_REPO}"
+      - echo "Branch: ${CI_COMMIT_BRANCH}"
+      - echo "Commit: ${CI_COMMIT_SHA:0:8}"
+      - echo "Check the logs above for details."
+    depends_on:
+      - build
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Matrix Configuration (Optional)
+# -----------------------------------------------------------------------------
+# Uncomment to run tests across multiple configurations
+# matrix:
+#   include:
+#     - NODE_VERSION: 18
+#     - NODE_VERSION: 20
+#     - NODE_VERSION: 22

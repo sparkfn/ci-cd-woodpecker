@@ -1,0 +1,339 @@
+# =============================================================================
+# Webhook & Polling Configuration
+# Version: 0.0.10
+#
+# This file configures webhook handling and polling services for CI/CD
+# automation. Used by:
+# - scripts/webhook-handler.sh
+# - scripts/poll-service.sh
+# - pipelines/on-merge.yml
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Webhook Server Configuration
+# -----------------------------------------------------------------------------
+webhook:
+  # Server settings
+  server:
+    # Port to listen on
+    port: ${WEBHOOK_PORT:-9000}
+    # Bind address (0.0.0.0 for all interfaces)
+    bind: "0.0.0.0"
+    # Request timeout in seconds
+    timeout: 30
+    # Maximum payload size (bytes)
+    max_payload_size: 10485760  # 10MB
+
+  # Security settings
+  security:
+    # Require signature validation
+    require_signature: true
+    # Signature header name (GitHub: X-Hub-Signature-256)
+    signature_header: "X-Hub-Signature-256"
+    # Secret for signature validation (use environment variable)
+    secret: "${WEBHOOK_SECRET}"
+    # IP whitelist (empty = allow all)
+    ip_whitelist: []
+    # Rate limiting
+    rate_limit:
+      enabled: true
+      requests_per_minute: 60
+
+  # Logging
+  logging:
+    # Log file path
+    file: "/var/log/webhook-handler.log"
+    # Log level: debug, info, warn, error
+    level: "info"
+    # Log format: json, text
+    format: "text"
+    # Log rotation
+    rotation:
+      max_size_mb: 100
+      max_files: 5
+
+  # Health check endpoint
+  health:
+    enabled: true
+    path: "/health"
+
+# -----------------------------------------------------------------------------
+# Event Routing
+# Route webhook events to specific actions
+# -----------------------------------------------------------------------------
+events:
+  # Push events (new commits)
+  push:
+    enabled: true
+    # Branches to trigger on
+    branches:
+      - main
+      - master
+      - develop
+    # Actions to perform
+    actions:
+      - trigger_pipeline
+      - notify_slack
+
+  # Pull request events
+  pull_request:
+    enabled: true
+    # PR actions to handle
+    actions_filter:
+      - opened
+      - reopened
+      - synchronize
+      - closed
+    # What to do
+    actions:
+      - trigger_pipeline
+      - update_status
+
+  # Merge events (PR merged)
+  merge:
+    enabled: true
+    # Target branches for merge detection
+    target_branches:
+      - main
+      - master
+    # Actions on merge
+    actions:
+      - trigger_deploy_pipeline
+      - notify_slack
+      - update_changelog
+
+  # Tag/Release events
+  release:
+    enabled: true
+    # Release types to handle
+    types:
+      - published
+      - created
+    actions:
+      - trigger_release_pipeline
+      - notify_slack
+
+  # Ping (webhook test)
+  ping:
+    enabled: true
+    actions:
+      - log_only
+
+# -----------------------------------------------------------------------------
+# Polling Service Configuration
+# For environments where webhooks are unavailable
+# -----------------------------------------------------------------------------
+polling:
+  # Enable/disable polling
+  enabled: true
+
+  # Poll interval in seconds
+  interval: 60
+
+  # State file for tracking last known state
+  state_file: "/var/lib/poll-service/state.json"
+
+  # PID file for daemon mode
+  pid_file: "/var/run/poll-service.pid"
+
+  # Log file
+  log_file: "/var/log/poll-service.log"
+
+  # Repositories to monitor
+  # Format: owner/repo
+  repositories:
+    # Example repos (uncomment and modify as needed)
+    # - myorg/myapp
+    # - myorg/another-app
+    []
+
+  # Provider settings
+  providers:
+    github:
+      api_url: "https://api.github.com"
+      # Token from environment
+      token: "${GITHUB_TOKEN}"
+      # Rate limit handling
+      rate_limit_buffer: 100  # Keep this many requests in reserve
+
+    gitlab:
+      api_url: "https://gitlab.com/api/v4"
+      token: "${GITLAB_TOKEN}"
+
+    gitea:
+      api_url: "${GITEA_API}"
+      token: "${GITEA_TOKEN}"
+
+  # What to check
+  checks:
+    # Check for new commits on main branches
+    new_commits: true
+    # Check for merged PRs/MRs
+    merged_prs: true
+    # Check for new tags
+    new_tags: true
+
+  # Backoff settings for API errors
+  backoff:
+    initial_delay: 5
+    max_delay: 300
+    multiplier: 2
+
+# -----------------------------------------------------------------------------
+# Pipeline Triggers
+# Configure how to trigger Woodpecker pipelines
+# -----------------------------------------------------------------------------
+pipeline_triggers:
+  # Woodpecker server settings
+  woodpecker:
+    server: "${WOODPECKER_SERVER:-http://localhost:8000}"
+    token: "${WOODPECKER_TOKEN}"
+
+  # Default pipeline to trigger
+  default_pipeline: ".woodpecker.yml"
+
+  # Event-specific pipelines
+  pipelines:
+    push:
+      file: ".woodpecker.yml"
+      variables: {}
+
+    pull_request:
+      file: ".woodpecker.yml"
+      variables:
+        CI_PULL_REQUEST: "true"
+
+    merge:
+      file: "pipelines/on-merge.yml"
+      variables:
+        CI_MERGE_EVENT: "true"
+
+    tag:
+      file: ".woodpecker.yml"
+      variables:
+        CI_TAG_EVENT: "true"
+
+    release:
+      file: "pipelines/deploy.yml"
+      variables:
+        CI_RELEASE: "true"
+
+# -----------------------------------------------------------------------------
+# Notifications
+# Configure notification channels for events
+# -----------------------------------------------------------------------------
+notifications:
+  # Slack notifications
+  slack:
+    enabled: true
+    webhook_url: "${SLACK_WEBHOOK}"
+    channel: "#ci-cd"
+    # Events to notify on
+    events:
+      - merge
+      - deploy_success
+      - deploy_failure
+      - release
+    # Message templates
+    templates:
+      merge: |
+        :twisted_rightwards_arrows: *PR Merged*
+        Repository: `{repo}`
+        PR: #{pr_number} - {pr_title}
+        Merged by: {author}
+
+      deploy_success: |
+        :white_check_mark: *Deployment Successful*
+        Repository: `{repo}`
+        Version: `{version}`
+        Environment: `{environment}`
+
+      deploy_failure: |
+        :x: *Deployment Failed*
+        Repository: `{repo}`
+        Version: `{version}`
+        Environment: `{environment}`
+        Check the pipeline for details.
+
+  # Discord notifications
+  discord:
+    enabled: false
+    webhook_url: "${DISCORD_WEBHOOK}"
+    # Similar structure to Slack
+
+  # Email notifications
+  email:
+    enabled: false
+    smtp_host: "${SMTP_HOST}"
+    smtp_port: 587
+    username: "${SMTP_USERNAME}"
+    password: "${SMTP_PASSWORD}"
+    from: "ci-cd@example.com"
+    recipients:
+      - team@example.com
+
+# -----------------------------------------------------------------------------
+# Merge Handling
+# Special configuration for merge events
+# -----------------------------------------------------------------------------
+merge_handling:
+  # Automatically trigger deployment after merge
+  auto_deploy:
+    enabled: true
+    # Only for these target branches
+    branches:
+      - main
+    # Deploy to these environments
+    environments:
+      - staging
+    # Require tests to pass first
+    require_tests: true
+
+  # Changelog updates
+  changelog:
+    enabled: true
+    # File to update
+    file: "CHANGELOG.md"
+    # How to extract version info
+    version_from: "package.json"  # or "tag", "pr_label"
+
+  # Release automation
+  release:
+    # Auto-create release on merge to main
+    auto_create: false
+    # Use PR title as release notes
+    use_pr_description: true
+    # Tag format
+    tag_format: "v{version}"
+
+# -----------------------------------------------------------------------------
+# Security & Validation
+# -----------------------------------------------------------------------------
+security:
+  # Allowed repositories (empty = allow all configured repos)
+  allowed_repos: []
+
+  # Blocked IP addresses
+  blocked_ips: []
+
+  # Require HTTPS
+  require_https: false
+
+  # Validate webhook payload structure
+  validate_payload: true
+
+  # Maximum request body size
+  max_body_size: 10485760  # 10MB
+
+# -----------------------------------------------------------------------------
+# Secrets Reference
+# These secrets should be set as environment variables
+# -----------------------------------------------------------------------------
+# Required secrets:
+#   WEBHOOK_SECRET      - Webhook signature secret
+#   GITHUB_TOKEN        - GitHub API token (for polling)
+#   GITLAB_TOKEN        - GitLab API token (for polling)
+#   WOODPECKER_TOKEN    - Woodpecker API token
+#   WOODPECKER_SERVER   - Woodpecker server URL
+#   SLACK_WEBHOOK       - Slack webhook URL (optional)

@@ -1,0 +1,246 @@
+# =============================================================================
+# Woodpecker CI Pipeline Configuration
+# =============================================================================
+# This is the root pipeline configuration for your project.
+# Place this file in your repository root as .woodpecker.yml
+#
+# Documentation: https://woodpecker-ci.org/docs/usage/pipeline-syntax
+# Version: 0.0.4
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pipeline Labels (for agent selection)
+# -----------------------------------------------------------------------------
+labels:
+  platform: linux/amd64
+
+# -----------------------------------------------------------------------------
+# Clone Configuration
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 50
+      tags: true
+      # Uncomment for submodules:
+      # recursive: true
+      # submodule_update_remote: true
+
+# -----------------------------------------------------------------------------
+# Workflow Configuration
+# -----------------------------------------------------------------------------
+# Skip CI entirely if commit message contains [skip ci]
+when:
+  - evaluate: 'not (CI_COMMIT_MESSAGE contains "[skip ci]" or CI_COMMIT_MESSAGE contains "[ci skip]")'
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ===========================================================================
+  # Stage 1: Setup & Validation
+  # ===========================================================================
+  
+  validate:
+    image: alpine:latest
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "🚀 Woodpecker CI Pipeline Starting"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "📁 Repository:  ${CI_REPO}"
+      - echo "🌿 Branch:      ${CI_COMMIT_BRANCH:-N/A}"
+      - echo "🏷️  Tag:         ${CI_COMMIT_TAG:-N/A}"
+      - echo "📝 Commit:      ${CI_COMMIT_SHA:0:8}"
+      - echo "👤 Author:      ${CI_COMMIT_AUTHOR}"
+      - echo "📋 Event:       ${CI_PIPELINE_EVENT}"
+      - echo "🔢 Pipeline:    #${CI_PIPELINE_NUMBER}"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # ===========================================================================
+  # Stage 2: Dependencies
+  # ===========================================================================
+  
+  install:
+    image: node:20-alpine
+    commands:
+      - echo "📦 Installing dependencies..."
+      # Auto-detect package manager
+      - |
+        if [ -f "pnpm-lock.yaml" ]; then
+          npm install -g pnpm
+          pnpm install --frozen-lockfile
+        elif [ -f "yarn.lock" ]; then
+          yarn install --frozen-lockfile
+        elif [ -f "package-lock.json" ]; then
+          npm ci
+        elif [ -f "package.json" ]; then
+          npm install
+        else
+          echo "⚠️ No Node.js package manifest found, skipping..."
+        fi
+    when:
+      - event: [push, pull_request, tag, manual]
+
+  # ===========================================================================
+  # Stage 3: Quality Checks (parallel)
+  # ===========================================================================
+  
+  lint:
+    image: node:20-alpine
+    commands:
+      - echo "🔍 Running linters..."
+      - |
+        if [ -f "package.json" ] && grep -q '"lint"' package.json; then
+          npm run lint
+        else
+          echo "ℹ️ No lint script found, skipping..."
+        fi
+    depends_on:
+      - install
+    when:
+      - event: [push, pull_request]
+
+  typecheck:
+    image: node:20-alpine
+    commands:
+      - echo "📐 Running type checks..."
+      - |
+        if [ -f "tsconfig.json" ]; then
+          npx tsc --noEmit
+        else
+          echo "ℹ️ No TypeScript config found, skipping..."
+        fi
+    depends_on:
+      - install
+    when:
+      - event: [push, pull_request]
+
+  # ===========================================================================
+  # Stage 4: Testing
+  # ===========================================================================
+  
+  test:
+    image: node:20-alpine
+    commands:
+      - echo "🧪 Running tests..."
+      - |
+        if [ -f "package.json" ] && grep -q '"test"' package.json; then
+          npm test
+        else
+          echo "ℹ️ No test script found, skipping..."
+        fi
+    depends_on:
+      - lint
+      - typecheck
+    when:
+      - event: [push, pull_request]
+
+  # ===========================================================================
+  # Stage 5: Build
+  # ===========================================================================
+  
+  build:
+    image: node:20-alpine
+    commands:
+      - echo "🏗️ Building application..."
+      - |
+        if [ -f "package.json" ] && grep -q '"build"' package.json; then
+          npm run build
+        else
+          echo "ℹ️ No build script found, skipping..."
+        fi
+    depends_on:
+      - test
+    when:
+      - event: [push, pull_request, tag]
+
+  # ===========================================================================
+  # Stage 6: Docker Build (main branch only)
+  # ===========================================================================
+  
+  docker-build:
+    image: woodpeckerci/plugin-docker-buildx:4
+    settings:
+      repo: ${CI_REPO_OWNER}/${CI_REPO_NAME}
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+        - linux/arm64
+      tags:
+        - latest
+        - ${CI_COMMIT_SHA:0:8}
+      # Uncomment when ready to push:
+      # registry: ghcr.io
+      # username:
+      #   from_secret: docker_username
+      # password:
+      #   from_secret: docker_password
+      dry_run: true
+    depends_on:
+      - build
+    when:
+      - event: push
+        branch: [main, master]
+        path:
+          include:
+            - Dockerfile
+            - "src/**"
+            - "package.json"
+            - "package-lock.json"
+
+  # ===========================================================================
+  # Stage 7: Release (tags only)
+  # ===========================================================================
+  
+  release:
+    image: node:20-alpine
+    commands:
+      - echo "🎉 Creating release for tag ${CI_COMMIT_TAG}..."
+      # Add your release logic here (e.g., npm publish, GitHub release)
+      - echo "Release complete!"
+    depends_on:
+      - build
+    when:
+      - event: tag
+
+  # ===========================================================================
+  # Notifications
+  # ===========================================================================
+  
+  notify-success:
+    image: alpine:latest
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "✅ Pipeline Completed Successfully!"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    depends_on:
+      - build
+    when:
+      - status: success
+
+  notify-failure:
+    image: alpine:latest
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "❌ Pipeline Failed!"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Check the logs above for error details."
+    depends_on:
+      - build
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Services (Optional - uncomment as needed)
+# -----------------------------------------------------------------------------
+# services:
+#   database:
+#     image: postgres:15-alpine
+#     environment:
+#       POSTGRES_USER: test
+#       POSTGRES_PASSWORD: test
+#       POSTGRES_DB: test_db
+#
+#   redis:
+#     image: redis:7-alpine

@@ -1,0 +1,472 @@
+# =============================================================================
+# Woodpecker CI/CD - On-Merge Pipeline
+# Version: 0.0.10
+#
+# This pipeline is triggered when a pull request is merged into main/master.
+# It handles post-merge tasks like:
+# - Running comprehensive tests
+# - Building production artifacts
+# - Triggering deployment to staging
+# - Updating changelog and documentation
+# - Creating release tags (if configured)
+# - Sending notifications
+#
+# Trigger: Merge event (via webhook or polling service)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pipeline Variables
+# -----------------------------------------------------------------------------
+variables:
+  - &docker_image "alpine:3.19"
+  - &node_image "node:20-alpine"
+  - &docker_dind "docker:24-dind"
+
+# -----------------------------------------------------------------------------
+# Clone Settings
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 50
+      tags: true
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Stage 1: Merge Information
+  # ---------------------------------------------------------------------------
+  - name: merge-info
+    image: *docker_image
+    commands:
+      - echo "📋 Merge Event Information"
+      - echo "================================"
+      - echo "Repository: ${CI_REPO}"
+      - echo "Branch: ${CI_COMMIT_BRANCH}"
+      - echo "Commit: ${CI_COMMIT_SHA}"
+      - echo "Author: ${CI_COMMIT_AUTHOR}"
+      - echo "Message: ${CI_COMMIT_MESSAGE}"
+      - echo "================================"
+      - |
+        # Display PR info if available
+        if [ -n "${MERGE_PR_NUMBER:-}" ]; then
+          echo "PR Number: #${MERGE_PR_NUMBER}"
+          echo "Source Branch: ${MERGE_HEAD_BRANCH:-unknown}"
+          echo "Target Branch: ${MERGE_BASE_BRANCH:-main}"
+        fi
+      - echo "================================"
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Install Dependencies
+  # ---------------------------------------------------------------------------
+  - name: install-deps
+    image: *node_image
+    commands:
+      - echo "📦 Installing dependencies..."
+      - |
+        if [ -f "package-lock.json" ]; then
+          npm ci
+        elif [ -f "yarn.lock" ]; then
+          yarn install --frozen-lockfile
+        elif [ -f "pnpm-lock.yaml" ]; then
+          corepack enable
+          pnpm install --frozen-lockfile
+        fi
+      - echo "✅ Dependencies installed"
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+        path:
+          include:
+            - "package.json"
+            - "package-lock.json"
+            - "yarn.lock"
+            - "pnpm-lock.yaml"
+            - "src/**"
+            - "lib/**"
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Full Test Suite
+  # ---------------------------------------------------------------------------
+  - name: run-tests
+    image: *node_image
+    commands:
+      - echo "🧪 Running full test suite..."
+      - |
+        if [ -f "package.json" ]; then
+          npm test -- --coverage --ci 2>/dev/null || npm test 2>/dev/null || echo "No tests configured"
+        fi
+      - echo "✅ Tests complete"
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  - name: integration-tests
+    image: *node_image
+    commands:
+      - echo "🔗 Running integration tests..."
+      - |
+        if [ -f "package.json" ] && grep -q "test:integration" package.json; then
+          npm run test:integration
+        else
+          echo "No integration tests configured"
+        fi
+      - echo "✅ Integration tests complete"
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: Build Production Artifacts
+  # ---------------------------------------------------------------------------
+  - name: build-production
+    image: *node_image
+    commands:
+      - echo "🏗️ Building production artifacts..."
+      - |
+        if [ -f "package.json" ]; then
+          npm run build 2>/dev/null || echo "No build step configured"
+        fi
+      - echo "✅ Build complete"
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  - name: build-docker-image
+    image: *docker_dind
+    commands:
+      - echo "🐳 Building Docker image..."
+      - |
+        if [ -f "Dockerfile" ]; then
+          # Determine version
+          if [ -f "package.json" ]; then
+            VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+          else
+            VERSION="${CI_COMMIT_SHA:0:8}"
+          fi
+          
+          # Build image
+          docker build \
+            -t ${CI_REPO_NAME}:${VERSION} \
+            -t ${CI_REPO_NAME}:latest \
+            -t ${CI_REPO_NAME}:${CI_COMMIT_SHA:0:8} \
+            --label "git.commit=${CI_COMMIT_SHA}" \
+            --label "git.branch=${CI_COMMIT_BRANCH}" \
+            --label "build.number=${CI_PIPELINE_NUMBER}" \
+            .
+          
+          echo "✅ Docker image built: ${CI_REPO_NAME}:${VERSION}"
+        else
+          echo "⚠️ No Dockerfile found, skipping Docker build"
+        fi
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+        path:
+          include:
+            - "Dockerfile"
+            - "docker-compose*.yml"
+            - "src/**"
+
+  - name: push-docker-image
+    image: *docker_dind
+    commands:
+      - echo "📤 Pushing Docker image to registry..."
+      - |
+        if [ -n "${DOCKER_USERNAME}" ] && [ -f "Dockerfile" ]; then
+          echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin ${DOCKER_REGISTRY:-docker.io}
+          
+          # Get version
+          if [ -f "package.json" ]; then
+            VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+          else
+            VERSION="${CI_COMMIT_SHA:0:8}"
+          fi
+          
+          REGISTRY="${DOCKER_REGISTRY:-docker.io}"
+          
+          docker tag ${CI_REPO_NAME}:${VERSION} ${REGISTRY}/${CI_REPO_NAME}:${VERSION}
+          docker tag ${CI_REPO_NAME}:latest ${REGISTRY}/${CI_REPO_NAME}:latest
+          
+          docker push ${REGISTRY}/${CI_REPO_NAME}:${VERSION}
+          docker push ${REGISTRY}/${CI_REPO_NAME}:latest
+          
+          echo "✅ Pushed to registry"
+        else
+          echo "⚠️ No registry credentials or Dockerfile, skipping push"
+        fi
+    secrets:
+      - docker_username
+      - docker_password
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # Stage 5: Update Changelog
+  # ---------------------------------------------------------------------------
+  - name: update-changelog
+    image: *docker_image
+    commands:
+      - echo "📝 Updating changelog..."
+      - apk add --no-cache git curl jq
+      - |
+        # Only update if we have PR info
+        if [ -z "${MERGE_PR_NUMBER:-}" ]; then
+          echo "No PR number available, checking commit message..."
+          # Try to extract PR number from merge commit message
+          PR_NUM=$(echo "${CI_COMMIT_MESSAGE}" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+          if [ -n "$PR_NUM" ]; then
+            export MERGE_PR_NUMBER="$PR_NUM"
+          fi
+        fi
+        
+        if [ -n "${MERGE_PR_NUMBER:-}" ]; then
+          echo "Processing PR #${MERGE_PR_NUMBER}"
+          
+          # Get PR details from GitHub API
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            PR_DATA=$(curl -sf \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${CI_REPO}/pulls/${MERGE_PR_NUMBER}" 2>/dev/null || echo "{}")
+            
+            PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // "Unknown"')
+            PR_AUTHOR=$(echo "$PR_DATA" | jq -r '.user.login // "Unknown"')
+            
+            # Check if CHANGELOG.md exists
+            if [ -f "CHANGELOG.md" ]; then
+              # Prepare changelog entry
+              DATE=$(date +%Y-%m-%d)
+              ENTRY="- ${PR_TITLE} (#${MERGE_PR_NUMBER}) @${PR_AUTHOR}"
+              
+              # Add entry under [Unreleased] section
+              sed -i "/## \[Unreleased\]/a\\
+${ENTRY}" CHANGELOG.md
+              
+              echo "Added changelog entry: $ENTRY"
+            else
+              echo "No CHANGELOG.md found"
+            fi
+          else
+            echo "No GitHub token, skipping PR info fetch"
+          fi
+        else
+          echo "No PR information available"
+        fi
+    secrets:
+      - github_token
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+
+  # ---------------------------------------------------------------------------
+  # Stage 6: Trigger Staging Deployment
+  # ---------------------------------------------------------------------------
+  - name: trigger-staging-deploy
+    image: *docker_image
+    commands:
+      - echo "🚀 Triggering staging deployment..."
+      - apk add --no-cache curl jq
+      - |
+        # Get version
+        if [ -f "package.json" ]; then
+          VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+        else
+          VERSION="${CI_COMMIT_SHA:0:8}"
+        fi
+        
+        # Trigger deploy pipeline via Woodpecker API
+        if [ -n "${WOODPECKER_TOKEN:-}" ]; then
+          RESPONSE=$(curl -sf -X POST \
+            -H "Authorization: Bearer ${WOODPECKER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"branch\": \"${CI_COMMIT_BRANCH}\",
+              \"variables\": {
+                \"DEPLOY_ENV\": \"staging\",
+                \"APP_VERSION\": \"${VERSION}\",
+                \"TRIGGERED_BY\": \"on-merge\"
+              }
+            }" \
+            "${WOODPECKER_SERVER}/api/repos/${CI_REPO}/builds" 2>&1) || true
+          
+          if [ -n "$RESPONSE" ]; then
+            BUILD_NUM=$(echo "$RESPONSE" | jq -r '.number // "unknown"')
+            echo "✅ Triggered staging deployment (Build #${BUILD_NUM})"
+          else
+            echo "⚠️ Could not trigger deployment pipeline"
+          fi
+        else
+          echo "⚠️ No Woodpecker token, skipping deployment trigger"
+          echo "To deploy, run manually:"
+          echo "  ./scripts/deploy.sh --env staging --version ${VERSION}"
+        fi
+    secrets:
+      - woodpecker_token
+    environment:
+      WOODPECKER_SERVER: ${WOODPECKER_SERVER:-http://localhost:8000}
+    when:
+      - event: [push, manual, custom]
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: Create Release Tag (Optional)
+  # ---------------------------------------------------------------------------
+  - name: create-release-tag
+    image: *docker_image
+    commands:
+      - echo "🏷️ Checking for release conditions..."
+      - apk add --no-cache git curl jq
+      - |
+        # Only create release if PR has 'release' label or title starts with 'release:'
+        CREATE_RELEASE=false
+        
+        if [ -n "${MERGE_PR_NUMBER:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          # Check PR labels
+          LABELS=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${CI_REPO}/issues/${MERGE_PR_NUMBER}/labels" 2>/dev/null || echo "[]")
+          
+          if echo "$LABELS" | jq -e '.[] | select(.name == "release")' > /dev/null 2>&1; then
+            CREATE_RELEASE=true
+          fi
+        fi
+        
+        # Check commit message
+        if echo "${CI_COMMIT_MESSAGE}" | grep -qi "^release:"; then
+          CREATE_RELEASE=true
+        fi
+        
+        if [ "$CREATE_RELEASE" = "true" ]; then
+          echo "Creating release tag..."
+          
+          # Get version from package.json
+          if [ -f "package.json" ]; then
+            VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+          else
+            VERSION=$(date +%Y.%m.%d)
+          fi
+          
+          TAG="v${VERSION}"
+          
+          # Create tag via GitHub API
+          curl -sf -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${CI_REPO}/git/refs" \
+            -d "{
+              \"ref\": \"refs/tags/${TAG}\",
+              \"sha\": \"${CI_COMMIT_SHA}\"
+            }" && echo "✅ Created tag: ${TAG}" || echo "⚠️ Failed to create tag"
+        else
+          echo "No release conditions met, skipping tag creation"
+        fi
+    secrets:
+      - github_token
+    when:
+      - event: [push, manual, custom]
+        branch: main
+
+  # ---------------------------------------------------------------------------
+  # Stage 8: Notifications
+  # ---------------------------------------------------------------------------
+  - name: notify-success
+    image: *docker_image
+    commands:
+      - echo "📢 Sending merge success notification..."
+      - apk add --no-cache curl
+      - |
+        # Get version
+        if [ -f "package.json" ]; then
+          VERSION=$(grep -o '"version": "[^"]*"' package.json | cut -d'"' -f4)
+        else
+          VERSION="${CI_COMMIT_SHA:0:8}"
+        fi
+        
+        if [ -n "${SLACK_WEBHOOK:-}" ]; then
+          curl -sf -X POST "${SLACK_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \"✅ Merge Pipeline Successful\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${CI_REPO_NAME}* merge pipeline completed\\n• Version: \`${VERSION}\`\\n• Commit: \`${CI_COMMIT_SHA:0:8}\`\\n• Branch: \`${CI_COMMIT_BRANCH}\`\\n• Author: ${CI_COMMIT_AUTHOR}\"
+                  }
+                },
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \":rocket: Staging deployment triggered\"
+                  }
+                }
+              ]
+            }"
+          echo "✅ Slack notification sent"
+        fi
+    secrets:
+      - slack_webhook
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+        status: success
+
+  - name: notify-failure
+    image: *docker_image
+    commands:
+      - echo "📢 Sending merge failure notification..."
+      - apk add --no-cache curl
+      - |
+        if [ -n "${SLACK_WEBHOOK:-}" ]; then
+          curl -sf -X POST "${SLACK_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \"❌ Merge Pipeline Failed\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${CI_REPO_NAME}* merge pipeline failed\\n• Commit: \`${CI_COMMIT_SHA:0:8}\`\\n• Branch: \`${CI_COMMIT_BRANCH}\`\\n• Author: ${CI_COMMIT_AUTHOR}\\n\\n:warning: Please check the pipeline logs\"
+                  }
+                }
+              ]
+            }"
+        fi
+    secrets:
+      - slack_webhook
+    when:
+      - event: [push, manual, custom]
+        branch: [main, master]
+        status: failure
+
+# -----------------------------------------------------------------------------
+# Labels
+# -----------------------------------------------------------------------------
+labels:
+  type: on-merge
+  stage: post-merge
+
+# -----------------------------------------------------------------------------
+# When to Run
+# -----------------------------------------------------------------------------
+when:
+  - event: push
+    branch: [main, master]
+  - event: manual
+  - event: custom

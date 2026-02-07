@@ -1,0 +1,26 @@
+# Environment
+.env
+*.pem
+*.key
+
+# Data directories (keep structure with .gitkeep)
+data/*
+!data/.gitkeep
+data/woodpecker/*
+!data/woodpecker/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.bak

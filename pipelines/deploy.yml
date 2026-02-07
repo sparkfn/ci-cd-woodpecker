@@ -1,0 +1,441 @@
+# =============================================================================
+# Woodpecker CI/CD - Deployment Pipeline
+# Version: 0.0.9
+# 
+# This pipeline handles staging and production deployments with:
+# - Staging deployment first
+# - Deployment verification/tests
+# - Production deployment on success
+# - Automatic issue creation on failure
+# - Rollback support
+#
+# Trigger: Manual or via API after successful main pipeline
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pipeline Variables
+# -----------------------------------------------------------------------------
+variables:
+  - &docker_image "alpine:3.19"
+  - &deploy_image "bitnami/kubectl:latest"
+  
+# -----------------------------------------------------------------------------
+# Clone Settings
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 1
+      tags: true
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Stage 1: Pre-deployment Checks
+  # ---------------------------------------------------------------------------
+  - name: validate-config
+    image: *docker_image
+    commands:
+      - echo "🔍 Validating deployment configuration..."
+      - |
+        # Check required environment variables
+        required_vars="DEPLOY_ENV APP_NAME APP_VERSION"
+        for var in $required_vars; do
+          if [ -z "$(eval echo \$$var)" ]; then
+            echo "❌ Error: $var is not set"
+            exit 1
+          fi
+        done
+      - echo "✅ Configuration validated"
+    environment:
+      DEPLOY_ENV: staging
+      APP_NAME: ${CI_REPO_NAME}
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+
+  - name: check-deployment-lock
+    image: *docker_image
+    commands:
+      - echo "🔒 Checking deployment lock..."
+      - |
+        # Check if there's an active deployment lock
+        if [ -f /tmp/deploy.lock ]; then
+          echo "❌ Deployment in progress. Please wait."
+          exit 1
+        fi
+      - echo "✅ No deployment lock found"
+    when:
+      - event: [push, manual, deployment]
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Build Artifacts
+  # ---------------------------------------------------------------------------
+  - name: build-artifacts
+    image: docker:24-dind
+    commands:
+      - echo "🏗️ Building deployment artifacts..."
+      - |
+        # Build Docker image if Dockerfile exists
+        if [ -f Dockerfile ]; then
+          docker build -t ${APP_NAME}:${APP_VERSION} .
+          docker tag ${APP_NAME}:${APP_VERSION} ${REGISTRY}/${APP_NAME}:${APP_VERSION}
+          docker tag ${APP_NAME}:${APP_VERSION} ${REGISTRY}/${APP_NAME}:latest
+        fi
+      - echo "✅ Build complete"
+    environment:
+      APP_NAME: ${CI_REPO_NAME}
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+      REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    when:
+      - event: [push, manual, deployment]
+
+  - name: push-artifacts
+    image: docker:24-dind
+    commands:
+      - echo "📤 Pushing artifacts to registry..."
+      - |
+        if [ -n "${DOCKER_USERNAME}" ]; then
+          echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USERNAME}" --password-stdin ${REGISTRY}
+          docker push ${REGISTRY}/${APP_NAME}:${APP_VERSION}
+          docker push ${REGISTRY}/${APP_NAME}:latest
+          echo "✅ Pushed to registry"
+        else
+          echo "⚠️ No registry credentials, skipping push"
+        fi
+    environment:
+      APP_NAME: ${CI_REPO_NAME}
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+      REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    secrets:
+      - docker_username
+      - docker_password
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    when:
+      - event: [push, manual, deployment]
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Deploy to Staging
+  # ---------------------------------------------------------------------------
+  - name: deploy-staging
+    image: *docker_image
+    commands:
+      - echo "🚀 Deploying to STAGING environment..."
+      - apk add --no-cache bash curl openssh-client jq
+      - |
+        # Run the deployment script
+        chmod +x ./scripts/deploy.sh
+        ./scripts/deploy.sh \
+          --env staging \
+          --version ${APP_VERSION} \
+          --app ${APP_NAME} \
+          --config ./config/deploy.yaml
+      - echo "✅ Staging deployment complete"
+    environment:
+      APP_NAME: ${CI_REPO_NAME}
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+      DEPLOY_ENV: staging
+    secrets:
+      - staging_ssh_key
+      - staging_host
+      - staging_user
+      - kubeconfig_staging
+    when:
+      - event: [push, manual, deployment]
+
+  - name: staging-health-check
+    image: *docker_image
+    commands:
+      - echo "🏥 Running staging health checks..."
+      - apk add --no-cache curl jq
+      - |
+        # Wait for service to be ready
+        max_attempts=30
+        attempt=0
+        while [ $attempt -lt $max_attempts ]; do
+          if curl -sf "${STAGING_URL}/health" > /dev/null 2>&1; then
+            echo "✅ Staging is healthy"
+            exit 0
+          fi
+          attempt=$((attempt + 1))
+          echo "⏳ Waiting for staging... ($attempt/$max_attempts)"
+          sleep 10
+        done
+        echo "❌ Staging health check failed"
+        exit 1
+    environment:
+      STAGING_URL: ${STAGING_URL:-http://staging.example.com}
+    when:
+      - event: [push, manual, deployment]
+
+  # ---------------------------------------------------------------------------
+  # Stage 4: Run Deployment Tests
+  # ---------------------------------------------------------------------------
+  - name: deployment-tests
+    image: *docker_image
+    commands:
+      - echo "🧪 Running deployment tests on staging..."
+      - apk add --no-cache curl jq bash
+      - |
+        # Run smoke tests
+        echo "Running smoke tests..."
+        
+        # Test 1: Health endpoint
+        if ! curl -sf "${STAGING_URL}/health"; then
+          echo "❌ Health check failed"
+          exit 1
+        fi
+        echo "✅ Health check passed"
+        
+        # Test 2: API responsiveness
+        response_time=$(curl -sf -w "%{time_total}" -o /dev/null "${STAGING_URL}/health")
+        if [ $(echo "$response_time > 5" | bc -l) -eq 1 ]; then
+          echo "⚠️ Response time too slow: ${response_time}s"
+        fi
+        echo "✅ API response time: ${response_time}s"
+        
+        # Test 3: Version verification
+        deployed_version=$(curl -sf "${STAGING_URL}/version" | jq -r '.version' 2>/dev/null || echo "unknown")
+        echo "📌 Deployed version: $deployed_version"
+        
+        # Custom tests from config
+        if [ -f ./tests/deployment-tests.sh ]; then
+          chmod +x ./tests/deployment-tests.sh
+          ./tests/deployment-tests.sh staging
+        fi
+      - echo "✅ All deployment tests passed"
+    environment:
+      STAGING_URL: ${STAGING_URL:-http://staging.example.com}
+    when:
+      - event: [push, manual, deployment]
+
+  # ---------------------------------------------------------------------------
+  # Stage 5: Deploy to Production (only if staging tests pass)
+  # ---------------------------------------------------------------------------
+  - name: deploy-production
+    image: *docker_image
+    commands:
+      - echo "🚀 Deploying to PRODUCTION environment..."
+      - apk add --no-cache bash curl openssh-client jq
+      - |
+        # Create deployment lock
+        echo "${CI_COMMIT_SHA}" > /tmp/deploy.lock
+        
+        # Backup current production state
+        echo "📦 Creating production backup..."
+        ./scripts/deploy.sh \
+          --env production \
+          --action backup \
+          --app ${APP_NAME}
+        
+        # Deploy to production
+        ./scripts/deploy.sh \
+          --env production \
+          --version ${APP_VERSION} \
+          --app ${APP_NAME} \
+          --config ./config/deploy.yaml
+        
+        # Remove lock
+        rm -f /tmp/deploy.lock
+      - echo "✅ Production deployment complete"
+    environment:
+      APP_NAME: ${CI_REPO_NAME}
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+      DEPLOY_ENV: production
+    secrets:
+      - production_ssh_key
+      - production_host
+      - production_user
+      - kubeconfig_production
+    when:
+      - event: [push, manual, deployment]
+      - status: success
+
+  - name: production-health-check
+    image: *docker_image
+    commands:
+      - echo "🏥 Running production health checks..."
+      - apk add --no-cache curl jq
+      - |
+        max_attempts=30
+        attempt=0
+        while [ $attempt -lt $max_attempts ]; do
+          if curl -sf "${PRODUCTION_URL}/health" > /dev/null 2>&1; then
+            echo "✅ Production is healthy"
+            
+            # Verify deployed version
+            deployed_version=$(curl -sf "${PRODUCTION_URL}/version" | jq -r '.version' 2>/dev/null)
+            echo "📌 Production version: $deployed_version"
+            exit 0
+          fi
+          attempt=$((attempt + 1))
+          echo "⏳ Waiting for production... ($attempt/$max_attempts)"
+          sleep 10
+        done
+        echo "❌ Production health check failed - initiating rollback"
+        exit 1
+    environment:
+      PRODUCTION_URL: ${PRODUCTION_URL:-http://example.com}
+    when:
+      - event: [push, manual, deployment]
+      - status: success
+
+  # ---------------------------------------------------------------------------
+  # Stage 6: Rollback on Failure
+  # ---------------------------------------------------------------------------
+  - name: rollback-production
+    image: *docker_image
+    commands:
+      - echo "⚠️ Production health check failed - Rolling back..."
+      - apk add --no-cache bash curl openssh-client
+      - |
+        chmod +x ./scripts/rollback.sh
+        ./scripts/rollback.sh \
+          --env production \
+          --app ${APP_NAME}
+      - echo "✅ Rollback complete"
+    environment:
+      APP_NAME: ${CI_REPO_NAME}
+    secrets:
+      - production_ssh_key
+      - production_host
+      - production_user
+      - kubeconfig_production
+    when:
+      - event: [push, manual, deployment]
+      - status: failure
+
+  # ---------------------------------------------------------------------------
+  # Stage 7: Create Issue on Failure
+  # ---------------------------------------------------------------------------
+  - name: create-failure-issue
+    image: *docker_image
+    commands:
+      - echo "📝 Creating failure issue..."
+      - apk add --no-cache curl jq
+      - |
+        # Create GitHub issue for deployment failure
+        ISSUE_TITLE="🚨 Deployment Failed: ${CI_COMMIT_SHA:0:8}"
+        ISSUE_BODY="## Deployment Failure Report
+
+        **Commit:** ${CI_COMMIT_SHA}
+        **Branch:** ${CI_COMMIT_BRANCH}
+        **Author:** ${CI_COMMIT_AUTHOR}
+        **Pipeline:** ${CI_PIPELINE_URL}
+        **Time:** $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+        ### Details
+        The deployment to **${DEPLOY_ENV:-production}** has failed.
+
+        ### Action Required
+        1. Check the pipeline logs for error details
+        2. Review recent commits for potential issues
+        3. If needed, manually trigger a rollback
+
+        ### Labels
+        - deployment-failure
+        - needs-attention
+        - priority-high
+        "
+
+        curl -sf -X POST \
+          -H "Authorization: token ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github.v3+json" \
+          "https://api.github.com/repos/${CI_REPO_OWNER}/${CI_REPO_NAME}/issues" \
+          -d "$(jq -n \
+            --arg title "$ISSUE_TITLE" \
+            --arg body "$ISSUE_BODY" \
+            '{title: $title, body: $body, labels: ["deployment-failure", "needs-attention"]}'
+          )"
+      - echo "✅ Issue created"
+    secrets:
+      - github_token
+    when:
+      - event: [push, manual, deployment]
+      - status: failure
+
+  # ---------------------------------------------------------------------------
+  # Stage 8: Notifications
+  # ---------------------------------------------------------------------------
+  - name: notify-success
+    image: *docker_image
+    commands:
+      - echo "📢 Sending success notification..."
+      - apk add --no-cache curl
+      - |
+        if [ -n "${SLACK_WEBHOOK}" ]; then
+          curl -sf -X POST "${SLACK_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \"✅ Deployment Successful\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${CI_REPO_NAME}* deployed to production\\n• Version: \`${APP_VERSION}\`\\n• Commit: \`${CI_COMMIT_SHA:0:8}\`\\n• Branch: \`${CI_COMMIT_BRANCH}\`\"
+                  }
+                }
+              ]
+            }"
+        fi
+    environment:
+      APP_VERSION: ${CI_COMMIT_SHA:0:8}
+    secrets:
+      - slack_webhook
+    when:
+      - event: [push, manual, deployment]
+      - status: success
+
+  - name: notify-failure
+    image: *docker_image
+    commands:
+      - echo "📢 Sending failure notification..."
+      - apk add --no-cache curl
+      - |
+        if [ -n "${SLACK_WEBHOOK}" ]; then
+          curl -sf -X POST "${SLACK_WEBHOOK}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"text\": \"❌ Deployment Failed\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"*${CI_REPO_NAME}* deployment failed\\n• Commit: \`${CI_COMMIT_SHA:0:8}\`\\n• Branch: \`${CI_COMMIT_BRANCH}\`\\n• Check pipeline for details\"
+                  }
+                }
+              ]
+            }"
+        fi
+    secrets:
+      - slack_webhook
+    when:
+      - event: [push, manual, deployment]
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Labels for filtering
+# -----------------------------------------------------------------------------
+labels:
+  type: deployment
+  stage: production
+
+# -----------------------------------------------------------------------------
+# When to run this pipeline
+# -----------------------------------------------------------------------------
+when:
+  - event: manual
+  - event: deployment
+  - event: push
+    branch: main
+    path:
+      include:
+        - .woodpecker/deploy.yml
+        - scripts/deploy.sh
+        - config/deploy.yaml

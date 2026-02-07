@@ -1,0 +1,293 @@
+# =============================================================================
+# Deployment Configuration
+# Version: 0.0.9
+#
+# This file defines deployment settings for all environments.
+# Used by: scripts/deploy.sh, scripts/rollback.sh, pipelines/deploy.yml
+#
+# Environment-specific settings can be overridden using environment variables.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# Apply to all environments unless overridden
+# -----------------------------------------------------------------------------
+global:
+  # Application information
+  app:
+    name: "${APP_NAME:-myapp}"
+    # Health check endpoint (must return 2xx for healthy)
+    health_endpoint: "/health"
+    # Version endpoint (optional, returns JSON with version info)
+    version_endpoint: "/version"
+    
+  # Docker registry settings
+  registry:
+    url: "${DOCKER_REGISTRY:-docker.io}"
+    # Use credentials from secrets (docker_username, docker_password)
+    use_credentials: true
+    
+  # State and backup directories
+  state:
+    state_dir: "/var/lib/deploy-state"
+    backup_dir: "/var/lib/deploy-backups"
+    # Number of backups to retain per environment
+    backup_retention: 5
+    
+  # Notification settings
+  notifications:
+    slack:
+      enabled: true
+      # Webhook URL from secret
+      webhook_secret: "slack_webhook"
+      # Channels (can be overridden per environment)
+      success_channel: "#deployments"
+      failure_channel: "#alerts"
+    github:
+      enabled: true
+      # Create issues on failure
+      create_issue_on_failure: true
+      # Add deployment status to commit
+      update_commit_status: true
+
+  # Health check settings
+  health_check:
+    # Maximum attempts before declaring failure
+    max_attempts: 30
+    # Seconds between checks
+    interval: 10
+    # Timeout for each health check request (seconds)
+    timeout: 5
+
+  # Rollback settings
+  rollback:
+    # Automatically rollback on health check failure
+    auto_rollback: true
+    # Wait time before rollback (seconds)
+    wait_before_rollback: 60
+
+# -----------------------------------------------------------------------------
+# Environment: Staging
+# -----------------------------------------------------------------------------
+environments:
+  staging:
+    # Deployment method: docker | docker-compose | ssh | kubernetes | helm
+    method: "docker"
+    
+    # Environment-specific registry (optional, falls back to global)
+    # registry: "staging-registry.example.com"
+    
+    # Docker settings (for method: docker or docker-compose)
+    docker:
+      # Container name suffix (full name: {app_name}-{suffix})
+      container_suffix: "staging"
+      # Docker network to attach
+      network: "staging-network"
+      # Port mappings
+      ports:
+        - host: 8080
+          container: 3000
+        - host: 8443
+          container: 3443
+      # Environment variables to set in container
+      environment:
+        NODE_ENV: "staging"
+        LOG_LEVEL: "debug"
+        DB_HOST: "${STAGING_DB_HOST:-localhost}"
+      # Volume mounts
+      volumes:
+        - host: "/data/staging/logs"
+          container: "/var/log/app"
+        - host: "/data/staging/uploads"
+          container: "/app/uploads"
+      # Resource limits
+      resources:
+        memory: "512m"
+        cpus: "1.0"
+    
+    # SSH settings (for method: ssh)
+    ssh:
+      host: "${STAGING_SSH_HOST:-staging.example.com}"
+      user: "${STAGING_SSH_USER:-deploy}"
+      # Key path or use SSH_KEY secret
+      key_secret: "staging_ssh_key"
+      # Remote directory for deployment
+      remote_dir: "/opt/app"
+    
+    # Kubernetes settings (for method: kubernetes or helm)
+    kubernetes:
+      namespace: "staging"
+      # Kubeconfig secret name
+      kubeconfig_secret: "kubeconfig_staging"
+      # Replica count
+      replicas: 1
+      # Resource requests/limits
+      resources:
+        requests:
+          memory: "256Mi"
+          cpu: "100m"
+        limits:
+          memory: "512Mi"
+          cpu: "500m"
+    
+    # Helm settings (for method: helm)
+    helm:
+      release_name: "${APP_NAME:-myapp}-staging"
+      chart_path: "./charts/${APP_NAME:-myapp}"
+      values_file: "values-staging.yaml"
+    
+    # Health check overrides
+    health_check:
+      url: "${STAGING_URL:-http://staging.example.com}"
+      max_attempts: 20
+      interval: 5
+    
+    # Tests to run after deployment
+    tests:
+      smoke_tests: true
+      integration_tests: true
+      performance_tests: false
+
+# -----------------------------------------------------------------------------
+# Environment: Production
+# -----------------------------------------------------------------------------
+  production:
+    method: "docker"
+    
+    # Docker settings
+    docker:
+      container_suffix: "production"
+      network: "production-network"
+      ports:
+        - host: 80
+          container: 3000
+        - host: 443
+          container: 3443
+      environment:
+        NODE_ENV: "production"
+        LOG_LEVEL: "info"
+        DB_HOST: "${PRODUCTION_DB_HOST:-db.example.com}"
+      volumes:
+        - host: "/data/production/logs"
+          container: "/var/log/app"
+        - host: "/data/production/uploads"
+          container: "/app/uploads"
+      resources:
+        memory: "2g"
+        cpus: "2.0"
+    
+    # SSH settings
+    ssh:
+      host: "${PRODUCTION_SSH_HOST:-prod.example.com}"
+      user: "${PRODUCTION_SSH_USER:-deploy}"
+      key_secret: "production_ssh_key"
+      remote_dir: "/opt/app"
+    
+    # Kubernetes settings
+    kubernetes:
+      namespace: "production"
+      kubeconfig_secret: "kubeconfig_production"
+      replicas: 3
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "250m"
+        limits:
+          memory: "2Gi"
+          cpu: "2"
+      # Pod disruption budget
+      pdb:
+        min_available: 2
+      # Horizontal pod autoscaler
+      hpa:
+        enabled: true
+        min_replicas: 3
+        max_replicas: 10
+        target_cpu_utilization: 70
+    
+    # Helm settings
+    helm:
+      release_name: "${APP_NAME:-myapp}"
+      chart_path: "./charts/${APP_NAME:-myapp}"
+      values_file: "values-production.yaml"
+    
+    # Health check overrides
+    health_check:
+      url: "${PRODUCTION_URL:-http://example.com}"
+      max_attempts: 30
+      interval: 10
+    
+    # Tests to run after deployment
+    tests:
+      smoke_tests: true
+      integration_tests: false
+      performance_tests: false
+    
+    # Production-specific rollback settings
+    rollback:
+      auto_rollback: true
+      wait_before_rollback: 120
+    
+    # Deployment windows (optional - enforced by CI)
+    deployment_windows:
+      allowed_days: ["monday", "tuesday", "wednesday", "thursday"]
+      allowed_hours:
+        start: "09:00"
+        end: "17:00"
+      timezone: "UTC"
+    
+    # Approval requirements
+    approvals:
+      required: true
+      # Number of approvals needed
+      min_approvals: 1
+      # Users or teams who can approve
+      approvers:
+        - "team-leads"
+        - "platform-team"
+
+# -----------------------------------------------------------------------------
+# Deployment Pipeline Settings
+# These settings control how the pipeline executes deployments
+# -----------------------------------------------------------------------------
+pipeline:
+  # Order of environment deployment
+  environment_order:
+    - staging
+    - production
+  
+  # Wait between environments
+  wait_between_deployments: 300  # seconds
+  
+  # Require staging to pass before production
+  require_staging_success: true
+  
+  # Maximum parallel deployments
+  max_parallel: 1
+  
+  # Artifact settings
+  artifacts:
+    # Build once, deploy everywhere
+    build_once: true
+    # Tag format
+    tag_format: "${version}-${git_sha:0:8}"
+    # Also tag as latest for the environment
+    tag_latest: true
+
+# -----------------------------------------------------------------------------
+# Secrets Reference
+# These secrets should be configured in Woodpecker's secret management
+# -----------------------------------------------------------------------------
+# Required secrets:
+#   - docker_username     : Docker registry username
+#   - docker_password     : Docker registry password
+#   - staging_ssh_key     : SSH key for staging deployments
+#   - staging_host        : Staging server hostname
+#   - staging_user        : Staging SSH username
+#   - production_ssh_key  : SSH key for production deployments
+#   - production_host     : Production server hostname
+#   - production_user     : Production SSH username
+#   - kubeconfig_staging  : Base64-encoded kubeconfig for staging
+#   - kubeconfig_production : Base64-encoded kubeconfig for production
+#   - github_token        : GitHub token for creating issues/status
+#   - slack_webhook       : Slack webhook URL for notifications

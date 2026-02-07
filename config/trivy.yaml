@@ -1,0 +1,198 @@
+# =============================================================================
+# Trivy Configuration
+# =============================================================================
+# Configuration file for Trivy security scanner.
+# Place this in your repository at config/trivy.yaml or .trivy.yaml
+#
+# Documentation: https://aquasecurity.github.io/trivy/latest/docs/references/configuration/config-file/
+# Version: 0.0.5
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Global Settings
+# -----------------------------------------------------------------------------
+
+# Cache directory for vulnerability database
+cache:
+  dir: .trivy-cache
+
+# Quiet mode - suppress progress bar
+quiet: false
+
+# Debug mode - show debug logs
+debug: false
+
+# Timeout for scan operations
+timeout: 10m
+
+# -----------------------------------------------------------------------------
+# Severity Settings
+# -----------------------------------------------------------------------------
+
+# Severities to report
+# Options: UNKNOWN, LOW, MEDIUM, HIGH, CRITICAL
+severity:
+  - HIGH
+  - CRITICAL
+
+# Exit code when vulnerabilities are found
+# 0 = don't fail, 1 = fail on findings
+exit-code: 0
+
+# Ignore unfixed vulnerabilities
+# Useful when you can't immediately remediate
+ignore-unfixed: false
+
+# -----------------------------------------------------------------------------
+# Scan Settings
+# -----------------------------------------------------------------------------
+
+scan:
+  # Scanners to use
+  # Options: vuln, misconfig, secret, license
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+
+  # Skip directories during scan
+  skip-dirs:
+    - node_modules
+    - vendor
+    - .git
+    - .trivy-cache
+    - dist
+    - build
+    - coverage
+    - .next
+    - __pycache__
+
+  # Skip files during scan
+  skip-files:
+    - "*.min.js"
+    - "*.bundle.js"
+    - "package-lock.json"  # Scanned via lockfile analyzer
+    - "yarn.lock"          # Scanned via lockfile analyzer
+
+# -----------------------------------------------------------------------------
+# Vulnerability Settings
+# -----------------------------------------------------------------------------
+
+vulnerability:
+  # Vulnerability types to scan for
+  # Options: os, library
+  type:
+    - os
+    - library
+
+  # Ignore specific vulnerability IDs
+  # Add CVEs that are false positives or accepted risks
+  ignore-ids: []
+    # - CVE-2023-XXXXX  # Reason for ignoring
+
+  # Ignore vulnerabilities by status
+  ignore-status:
+    - not_affected
+    - will_not_fix
+
+# -----------------------------------------------------------------------------
+# Misconfiguration Settings
+# -----------------------------------------------------------------------------
+
+misconfiguration:
+  # Check types for IaC scanning
+  # Options: dockerfile, kubernetes, terraform, cloudformation, etc.
+  scanners:
+    - dockerfile
+    - kubernetes
+    - terraform
+
+  # Include non-failures in output
+  include-non-failures: false
+
+  # Terraform-specific settings
+  terraform:
+    exclude-downloaded-modules: true
+
+# -----------------------------------------------------------------------------
+# Secret Scanning Settings
+# -----------------------------------------------------------------------------
+
+secret:
+  # Enable secret scanning
+  enable: true
+
+  # Secret configuration file
+  # config: config/trivy-secret.yaml
+
+# -----------------------------------------------------------------------------
+# License Scanning Settings
+# -----------------------------------------------------------------------------
+
+license:
+  # Enable license scanning (requires Trivy premium features)
+  enable: false
+
+  # Forbidden licenses (SPDX identifiers)
+  forbidden:
+    - GPL-3.0
+    - AGPL-3.0
+
+  # Confidence level threshold
+  # Options: 0.0 - 1.0
+  confidence-level: 0.9
+
+# -----------------------------------------------------------------------------
+# Output Settings
+# -----------------------------------------------------------------------------
+
+format: table
+
+# Template for custom output format
+# template: "@html.tpl"
+
+# Output file path (optional)
+# output: reports/security-report.json
+
+# -----------------------------------------------------------------------------
+# Registry Settings (for image scanning)
+# -----------------------------------------------------------------------------
+
+registry:
+  # Insecure registries (use HTTP instead of HTTPS)
+  insecure: false
+
+  # Registry credentials (prefer secrets in CI)
+  # username: ""
+  # password: ""
+
+# -----------------------------------------------------------------------------
+# Database Settings
+# -----------------------------------------------------------------------------
+
+db:
+  # Skip database update (use cached database)
+  skip-update: false
+
+  # Download database only (don't scan)
+  download-only: false
+
+  # Light mode (faster but less accurate)
+  light: false
+
+  # Repository for vulnerability database
+  repository: ghcr.io/aquasecurity/trivy-db
+
+# -----------------------------------------------------------------------------
+# Server Mode Settings (for client-server mode)
+# -----------------------------------------------------------------------------
+
+# server:
+#   listen: 0.0.0.0:4954
+#   token: ""
+#   token-header: ""
+
+# client:
+#   remote: http://localhost:4954
+#   token: ""
+#   token-header: ""

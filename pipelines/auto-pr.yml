@@ -1,0 +1,430 @@
+# =============================================================================
+# Auto-PR Pipeline
+# =============================================================================
+# Automatically creates a Pull Request after an AI fix or manual fix branch.
+#
+# Flow:
+#   1. Validate fix branch exists and has changes
+#   2. Run final verification (tests, lint)
+#   3. Create PR with appropriate template
+#   4. Add labels and request reviewers
+#   5. Optionally enable auto-merge
+#
+# Triggers:
+#   - Automatic trigger from AI fix pipeline
+#   - Manual trigger with branch name
+#   - Push to ai-fix/* branches
+#
+# Required Secrets:
+#   - GITHUB_TOKEN (for PR creation)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  # Default target branch
+  - &default_target "main"
+
+  # PR settings
+  - &default_reviewers "${PR_DEFAULT_REVIEWERS:-}"
+  - &default_labels "${PR_DEFAULT_LABELS:-ai-fix,automated}"
+
+# -----------------------------------------------------------------------------
+# Common Settings
+# -----------------------------------------------------------------------------
+clone:
+  depth: 0
+
+# Trigger conditions
+when:
+  - event: manual
+  - event: custom
+    evaluate: 'CI_PIPELINE_EVENT == "auto-pr"'
+  - event: push
+    branch:
+      - ai-fix/*
+      - fix/*
+      - hotfix/*
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Step 1: Validate Branch
+  # ---------------------------------------------------------------------------
+  validate-branch:
+    image: alpine/git:latest
+    commands:
+      - |
+        echo "=========================================="
+        echo "Auto-PR Pipeline"
+        echo "=========================================="
+        echo "Repository: ${CI_REPO}"
+        echo "Branch: ${CI_COMMIT_BRANCH}"
+        echo "Commit: ${CI_COMMIT_SHA}"
+        echo "=========================================="
+
+      # Determine source and target branches
+      - |
+        # Source branch (the fix branch)
+        SOURCE_BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        echo "Source branch: ${SOURCE_BRANCH}"
+
+        # Target branch (where to merge)
+        TARGET_BRANCH="${PR_TARGET_BRANCH:-main}"
+        echo "Target branch: ${TARGET_BRANCH}"
+
+        # Save for later steps
+        echo "SOURCE_BRANCH=${SOURCE_BRANCH}" >> /tmp/pr-env
+        echo "TARGET_BRANCH=${TARGET_BRANCH}" >> /tmp/pr-env
+
+      # Verify source branch exists
+      - |
+        SOURCE_BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        if ! git show-ref --verify --quiet "refs/heads/${SOURCE_BRANCH}" 2>/dev/null; then
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${SOURCE_BRANCH}" 2>/dev/null; then
+            echo "ERROR: Source branch '${SOURCE_BRANCH}' not found"
+            exit 1
+          fi
+        fi
+        echo "Source branch verified"
+
+      # Verify there are changes to merge
+      - |
+        SOURCE_BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        TARGET_BRANCH="${PR_TARGET_BRANCH:-main}"
+
+        git fetch origin "${TARGET_BRANCH}" 2>/dev/null || true
+
+        DIFF_COUNT=$(git rev-list --count "origin/${TARGET_BRANCH}..HEAD" 2>/dev/null || echo "0")
+        echo "Commits ahead of ${TARGET_BRANCH}: ${DIFF_COUNT}"
+
+        if [ "${DIFF_COUNT}" -eq 0 ]; then
+          echo "WARNING: No new commits to merge"
+          # Don't fail - might be triggered manually
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Step 2: Run Verification
+  # ---------------------------------------------------------------------------
+  verify-changes:
+    image: node:20-slim
+    commands:
+      - |
+        echo "Running verification checks..."
+
+        # Install minimal dependencies for checking
+        apt-get update -qq && apt-get install -y -qq git
+
+        # Detect project type and run appropriate checks
+        if [ -f "package.json" ]; then
+          echo "Node.js project detected"
+          npm ci --silent 2>/dev/null || npm install --silent
+          
+          # Run lint if available
+          if grep -q '"lint"' package.json; then
+            echo "Running lint..."
+            npm run lint || echo "Lint warnings found (non-blocking)"
+          fi
+          
+          # Run tests
+          if grep -q '"test"' package.json; then
+            echo "Running tests..."
+            npm test
+          fi
+
+        elif [ -f "Cargo.toml" ]; then
+          echo "Rust project detected"
+          cargo check
+          cargo test
+
+        elif [ -f "go.mod" ]; then
+          echo "Go project detected"
+          go vet ./...
+          go test ./...
+
+        elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+          echo "Python project detected"
+          pip install -e ".[test]" 2>/dev/null || pip install pytest
+          pytest
+
+        elif [ -f "Makefile" ]; then
+          if grep -q '^lint:' Makefile; then
+            make lint || true
+          fi
+          if grep -q '^test:' Makefile; then
+            make test
+          fi
+
+        else
+          echo "No recognized project type, skipping verification"
+        fi
+
+        echo "Verification complete"
+
+    when:
+      - evaluate: 'CI_PIPELINE_EVENT != "manual" || SKIP_VERIFICATION != "true"'
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Prepare PR Metadata
+  # ---------------------------------------------------------------------------
+  prepare-pr:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache jq
+
+      # Determine PR title
+      - |
+        if [ -n "${PR_TITLE:-}" ]; then
+          TITLE="${PR_TITLE}"
+        else
+          # Auto-generate title from branch name
+          BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+          
+          # Extract meaningful part from branch name
+          case "${BRANCH}" in
+            ai-fix/*)
+              TITLE="fix: AI auto-fix for ${BRANCH#ai-fix/}"
+              ;;
+            fix/*)
+              TITLE="fix: ${BRANCH#fix/}"
+              ;;
+            hotfix/*)
+              TITLE="hotfix: ${BRANCH#hotfix/}"
+              ;;
+            feature/*)
+              TITLE="feat: ${BRANCH#feature/}"
+              ;;
+            *)
+              TITLE="chore: ${BRANCH}"
+              ;;
+          esac
+        fi
+        
+        echo "PR_TITLE=${TITLE}" >> /tmp/pr-env
+        echo "Generated PR title: ${TITLE}"
+
+      # Determine template
+      - |
+        BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        
+        if [ -n "${PR_TEMPLATE:-}" ]; then
+          TEMPLATE="${PR_TEMPLATE}"
+        else
+          case "${BRANCH}" in
+            ai-fix/*)
+              TEMPLATE="ai-fix"
+              ;;
+            security-fix/*)
+              TEMPLATE="security-fix"
+              ;;
+            hotfix/*)
+              TEMPLATE="hotfix"
+              ;;
+            *)
+              TEMPLATE="default"
+              ;;
+          esac
+        fi
+        
+        echo "PR_TEMPLATE=${TEMPLATE}" >> /tmp/pr-env
+        echo "Using template: ${TEMPLATE}"
+
+      # Prepare labels
+      - |
+        BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        LABELS="${PR_LABELS:-}"
+        
+        # Add automatic labels based on branch
+        case "${BRANCH}" in
+          ai-fix/*)
+            LABELS="${LABELS:+${LABELS},}ai-fix,automated"
+            ;;
+          security-fix/*)
+            LABELS="${LABELS:+${LABELS},}security,priority:high"
+            ;;
+          hotfix/*)
+            LABELS="${LABELS:+${LABELS},}hotfix,priority:critical"
+            ;;
+        esac
+        
+        echo "PR_LABELS=${LABELS}" >> /tmp/pr-env
+        echo "Labels: ${LABELS}"
+
+  # ---------------------------------------------------------------------------
+  # Step 4: Create Pull Request
+  # ---------------------------------------------------------------------------
+  create-pr:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache curl jq git bash
+
+      # Load environment
+      - |
+        if [ -f /tmp/pr-env ]; then
+          . /tmp/pr-env
+        fi
+
+      # Set defaults
+      - |
+        SOURCE_BRANCH="${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}"
+        TARGET_BRANCH="${PR_TARGET_BRANCH:-main}"
+        TITLE="${PR_TITLE:-Auto-PR from ${SOURCE_BRANCH}}"
+        TEMPLATE="${PR_TEMPLATE:-default}"
+        LABELS="${PR_LABELS:-}"
+
+      # Run create-pr script
+      - |
+        chmod +x ./scripts/create-pr.sh
+
+        # Build command
+        CMD="./scripts/create-pr.sh"
+        CMD="${CMD} --source '${SOURCE_BRANCH}'"
+        CMD="${CMD} --target '${TARGET_BRANCH}'"
+        CMD="${CMD} --title '${TITLE}'"
+        CMD="${CMD} --template '${TEMPLATE}'"
+
+        if [ -n "${LABELS}" ]; then
+          CMD="${CMD} --labels '${LABELS}'"
+        fi
+
+        if [ -n "${PR_REVIEWERS:-}" ]; then
+          CMD="${CMD} --reviewers '${PR_REVIEWERS}'"
+        fi
+
+        if [ -n "${ISSUE_NUMBER:-}" ]; then
+          CMD="${CMD} --issue '${ISSUE_NUMBER}'"
+        fi
+
+        if [ "${PR_DRAFT:-false}" = "true" ]; then
+          CMD="${CMD} --draft"
+        fi
+
+        if [ "${PR_AUTO_MERGE:-false}" = "true" ]; then
+          CMD="${CMD} --auto-merge"
+        fi
+
+        CMD="${CMD} --verbose"
+
+        echo "Running: ${CMD}"
+        eval "${CMD}"
+
+    secrets:
+      - GITHUB_TOKEN
+    environment:
+      - PR_SOURCE_BRANCH=${PR_SOURCE_BRANCH:-}
+      - PR_TARGET_BRANCH=${PR_TARGET_BRANCH:-main}
+      - PR_TITLE=${PR_TITLE:-}
+      - PR_TEMPLATE=${PR_TEMPLATE:-}
+      - PR_LABELS=${PR_LABELS:-}
+      - PR_REVIEWERS=${PR_REVIEWERS:-}
+      - PR_DRAFT=${PR_DRAFT:-false}
+      - PR_AUTO_MERGE=${PR_AUTO_MERGE:-false}
+      - ISSUE_NUMBER=${ISSUE_NUMBER:-}
+
+  # ---------------------------------------------------------------------------
+  # Step 5: Post-PR Actions
+  # ---------------------------------------------------------------------------
+  post-pr-actions:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache curl jq
+
+      # Read PR result
+      - |
+        if [ -f /tmp/create-pr-result.json ]; then
+          PR_NUMBER=$(jq -r '.pr_number' /tmp/create-pr-result.json)
+          PR_URL=$(jq -r '.pr_url' /tmp/create-pr-result.json)
+          echo "PR #${PR_NUMBER} created: ${PR_URL}"
+        else
+          echo "Warning: PR result file not found"
+          exit 0
+        fi
+
+      # Add comment to related issue (if exists)
+      - |
+        if [ -n "${ISSUE_NUMBER:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          REPO_OWNER=$(echo "${CI_REPO}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${CI_REPO}" | cut -d'/' -f2)
+
+          curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments" \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @- <<EOF
+        {
+          "body": "🔀 **Pull Request Created**\n\nA fix has been submitted: #${PR_NUMBER}\n\n[View Pull Request](${PR_URL})"
+        }
+        EOF
+        fi
+
+      # Notify via webhook (if configured)
+      - |
+        if [ -n "${WEBHOOK_URL:-}" ]; then
+          curl -s -X POST "${WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -d @- <<EOF
+        {
+          "event": "pr_created",
+          "pr_number": ${PR_NUMBER:-0},
+          "pr_url": "${PR_URL:-}",
+          "source_branch": "${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}",
+          "target_branch": "${PR_TARGET_BRANCH:-main}",
+          "repository": "${CI_REPO}",
+          "build_number": "${CI_BUILD_NUMBER}",
+          "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        }
+        EOF
+        fi
+
+    secrets:
+      - GITHUB_TOKEN
+      - WEBHOOK_URL
+    when:
+      - status: success
+
+  # ---------------------------------------------------------------------------
+  # Step 6: Notify on Failure
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache curl jq
+
+      - |
+        echo "Auto-PR creation failed"
+        echo "Manual PR creation may be required"
+
+        # If issue exists, add failure comment
+        if [ -n "${ISSUE_NUMBER:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          REPO_OWNER=$(echo "${CI_REPO}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${CI_REPO}" | cut -d'/' -f2)
+
+          curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments" \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @- <<EOF
+        {
+          "body": "⚠️ **Auto-PR Failed**\n\nThe automatic PR creation failed.\n\n**Build:** #${CI_BUILD_NUMBER}\n**Pipeline:** [View Pipeline](${CI_PIPELINE_URL})\n\nPlease create a PR manually for branch \`${PR_SOURCE_BRANCH:-${CI_COMMIT_BRANCH}}\`."
+        }
+        EOF
+        fi
+
+    secrets:
+      - GITHUB_TOKEN
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Branch Filters for Auto-trigger
+# -----------------------------------------------------------------------------
+branches:
+  include:
+    - ai-fix/*
+    - fix/*
+    - hotfix/*
+  exclude:
+    - main
+    - master
+    - develop

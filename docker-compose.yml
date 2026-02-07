@@ -1,0 +1,182 @@
+# =============================================================================
+# Woodpecker CI/CD - Docker Compose Configuration
+# =============================================================================
+# Version: 0.0.2
+# 
+# This file defines the Woodpecker CI server and agent containers.
+# 
+# Usage:
+#   1. Copy .env.example to .env and configure your values
+#   2. Generate agent secret: openssl rand -hex 32
+#   3. Start services: docker compose up -d
+#   4. Access UI: http://localhost:8000
+#
+# Prerequisites:
+#   - Docker and Docker Compose v2+
+#   - GitHub OAuth App or GitHub App credentials
+#   - Agent secret configured in .env
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Woodpecker Server
+  # ---------------------------------------------------------------------------
+  # The main CI server that handles webhooks, schedules builds, and serves the UI.
+  # Documentation: https://woodpecker-ci.org/docs/administration/server-config
+  # ---------------------------------------------------------------------------
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:latest
+    container_name: woodpecker-server
+    restart: unless-stopped
+    
+    ports:
+      # Web UI and API
+      - "${WOODPECKER_SERVER_ADDR:-8000}:8000"
+      # gRPC for agent communication
+      - "${WOODPECKER_GRPC_ADDR:-9000}:9000"
+    
+    volumes:
+      # Persistent data (database, etc.)
+      - ${WOODPECKER_DATA_DIR:-./data/woodpecker}:/data
+      # Logs directory
+      - ${WOODPECKER_LOGS_DIR:-./data/logs}:/logs
+    
+    environment:
+      # Server configuration
+      - WOODPECKER_HOST=${WOODPECKER_HOST:-http://localhost:8000}
+      - WOODPECKER_SERVER_ADDR=:8000
+      - WOODPECKER_GRPC_ADDR=:9000
+      
+      # Agent authentication
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET:?WOODPECKER_AGENT_SECRET is required}
+      
+      # Admin users
+      - WOODPECKER_ADMIN=${WOODPECKER_ADMIN:-}
+      
+      # Database configuration
+      - WOODPECKER_DATABASE_DRIVER=${WOODPECKER_DATABASE_DRIVER:-sqlite3}
+      - WOODPECKER_DATABASE_DATASOURCE=${WOODPECKER_DATABASE_DATASOURCE:-/data/woodpecker.sqlite}
+      
+      # GitHub OAuth configuration
+      - WOODPECKER_GITHUB=${WOODPECKER_GITHUB:-true}
+      - WOODPECKER_GITHUB_CLIENT=${WOODPECKER_GITHUB_CLIENT:-}
+      - WOODPECKER_GITHUB_SECRET=${WOODPECKER_GITHUB_SECRET:-}
+      
+      # GitHub App configuration (alternative to OAuth)
+      - WOODPECKER_GITHUB_APP_ID=${WOODPECKER_GITHUB_APP_ID:-}
+      
+      # Open registration (set to false for private instances)
+      - WOODPECKER_OPEN=false
+      
+      # Logging
+      - WOODPECKER_LOG_LEVEL=${LOG_LEVEL:-info}
+      - WOODPECKER_LOG_FILE=/logs/woodpecker-server.log
+    
+    networks:
+      - woodpecker-network
+    
+    # Health check to ensure server is responding
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    
+    # Limit resource usage
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    
+    labels:
+      - "com.woodpecker.component=server"
+      - "com.woodpecker.version=latest"
+
+  # ---------------------------------------------------------------------------
+  # Woodpecker Agent
+  # ---------------------------------------------------------------------------
+  # The agent executes pipeline steps. Can be scaled horizontally.
+  # Documentation: https://woodpecker-ci.org/docs/administration/agent-config
+  # ---------------------------------------------------------------------------
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:latest
+    container_name: woodpecker-agent
+    restart: unless-stopped
+    
+    # Run after server is healthy
+    depends_on:
+      woodpecker-server:
+        condition: service_healthy
+    
+    volumes:
+      # Docker socket for running containerized steps
+      # WARNING: This gives the agent container access to host Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Logs directory
+      - ${WOODPECKER_LOGS_DIR:-./data/logs}:/logs
+    
+    environment:
+      # Server connection
+      - WOODPECKER_SERVER=woodpecker-server:9000
+      - WOODPECKER_AGENT_SECRET=${WOODPECKER_AGENT_SECRET:?WOODPECKER_AGENT_SECRET is required}
+      
+      # Agent identification
+      - WOODPECKER_HOSTNAME=agent-01
+      - WOODPECKER_GRPC_SECURE=false
+      
+      # Maximum parallel pipelines (adjust based on resources)
+      - WOODPECKER_MAX_WORKFLOWS=2
+      
+      # Backend for running steps (docker, local, kubernetes)
+      - WOODPECKER_BACKEND=docker
+      
+      # Logging
+      - WOODPECKER_LOG_LEVEL=${LOG_LEVEL:-info}
+    
+    networks:
+      - woodpecker-network
+    
+    # Health check - verify agent can connect to server
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "woodpecker-agent"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    
+    # Limit resource usage
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 64M
+    
+    labels:
+      - "com.woodpecker.component=agent"
+      - "com.woodpecker.version=latest"
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  woodpecker-network:
+    name: woodpecker-network
+    driver: bridge
+    # Enable IPv6 if needed
+    # ipam:
+    #   config:
+    #     - subnet: "172.28.0.0/16"
+
+# =============================================================================
+# Volumes (optional - for named volumes instead of bind mounts)
+# =============================================================================
+# Uncomment to use Docker named volumes instead of bind mounts
+# volumes:
+#   woodpecker-data:
+#     name: woodpecker-data
+#   woodpecker-logs:
+#     name: woodpecker-logs

@@ -1,0 +1,281 @@
+# =============================================================================
+# AI Auto-fix Pipeline
+# =============================================================================
+# This pipeline is triggered when tests or security scans fail.
+# It attempts to automatically fix the issue using an AI coding agent.
+#
+# Flow:
+#   1. Receive error context from failed pipeline
+#   2. Run AI fix script with appropriate provider
+#   3. Verify the fix passes tests
+#   4. Create a fix branch and commit
+#   5. Trigger auto-PR pipeline
+#
+# Triggers:
+#   - Manual trigger with error context
+#   - Automatic trigger from failed pipelines (via webhook)
+#
+# Required Secrets:
+#   - ANTHROPIC_API_KEY (for Claude Code)
+#   - OPENAI_API_KEY (for Codex)
+#   - GITHUB_TOKEN (for branch/PR operations)
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  # AI provider configuration
+  - &ai_provider "${AI_FIX_PROVIDER:-claude-code}"
+  - &max_attempts "${AI_FIX_MAX_ATTEMPTS:-3}"
+  - &timeout "${AI_FIX_TIMEOUT:-300}"
+
+  # Branch naming
+  - &fix_branch_prefix "ai-fix"
+
+# -----------------------------------------------------------------------------
+# Common Settings
+# -----------------------------------------------------------------------------
+# Clone settings - we need full history for proper branching
+clone:
+  depth: 0
+
+# Only run on specific events
+when:
+  - event: manual
+  - event: custom
+    evaluate: 'CI_PIPELINE_EVENT == "ai-fix"'
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Step 1: Validate Environment
+  # ---------------------------------------------------------------------------
+  validate-environment:
+    image: alpine:3.19
+    commands:
+      - |
+        echo "=========================================="
+        echo "AI Auto-fix Pipeline"
+        echo "=========================================="
+        echo "Repository: ${CI_REPO}"
+        echo "Commit: ${CI_COMMIT_SHA}"
+        echo "Branch: ${CI_COMMIT_BRANCH}"
+        echo "Provider: ${AI_FIX_PROVIDER:-claude-code}"
+        echo "=========================================="
+
+      # Validate required environment variables
+      - |
+        if [ -z "${ERROR_CONTEXT:-}" ] && [ -z "${ERROR_FILE:-}" ]; then
+          echo "ERROR: Either ERROR_CONTEXT or ERROR_FILE must be provided"
+          exit 1
+        fi
+
+      # Create error file from context if provided inline
+      - |
+        if [ -n "${ERROR_CONTEXT:-}" ]; then
+          echo "${ERROR_CONTEXT}" > /tmp/error-context.txt
+          echo "Error context saved to /tmp/error-context.txt"
+        fi
+
+  # ---------------------------------------------------------------------------
+  # Step 2: Setup AI Environment
+  # ---------------------------------------------------------------------------
+  setup-ai-environment:
+    image: python:3.12-slim
+    commands:
+      # Install required tools
+      - apt-get update && apt-get install -y git curl jq
+
+      # Install AI CLI tools based on provider
+      - |
+        case "${AI_FIX_PROVIDER:-claude-code}" in
+          claude-code)
+            echo "Setting up Claude Code environment..."
+            pip install anthropic
+            # Install Claude Code CLI if available
+            npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+            ;;
+          codex)
+            echo "Setting up Codex environment..."
+            pip install openai
+            ;;
+          openhands)
+            echo "Setting up OpenHands environment..."
+            pip install openhands-ai 2>/dev/null || true
+            ;;
+          opencode)
+            echo "Setting up OpenCode environment..."
+            # OpenCode is typically pre-installed or Docker-based
+            ;;
+        esac
+
+      # Configure git for commits
+      - git config --global user.name "AI Auto-fix Bot"
+      - git config --global user.email "ai-fix-bot@woodpecker.local"
+
+    environment:
+      - AI_FIX_PROVIDER=${AI_FIX_PROVIDER:-claude-code}
+
+  # ---------------------------------------------------------------------------
+  # Step 3: Run AI Fix
+  # ---------------------------------------------------------------------------
+  run-ai-fix:
+    image: node:20-slim
+    commands:
+      # Install dependencies
+      - apt-get update && apt-get install -y git curl jq bash
+
+      # Determine error file location
+      - |
+        if [ -n "${ERROR_FILE:-}" ]; then
+          ERROR_PATH="${ERROR_FILE}"
+        else
+          ERROR_PATH="/tmp/error-context.txt"
+        fi
+
+      # Run AI fix script
+      - |
+        chmod +x ./scripts/ai-fix.sh
+        ./scripts/ai-fix.sh \
+          --error-file "${ERROR_PATH}" \
+          --repo . \
+          --provider "${AI_FIX_PROVIDER:-claude-code}" \
+          --branch "${CI_FIX_BRANCH:-ai-fix/${CI_BUILD_NUMBER}}" \
+          --max-attempts "${AI_FIX_MAX_ATTEMPTS:-3}" \
+          --timeout "${AI_FIX_TIMEOUT:-300}" \
+          ${ISSUE_NUMBER:+--issue-number ${ISSUE_NUMBER}} \
+          --verbose
+
+    secrets:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - GITHUB_TOKEN
+    environment:
+      - AI_FIX_PROVIDER=${AI_FIX_PROVIDER:-claude-code}
+      - AI_FIX_MAX_ATTEMPTS=${AI_FIX_MAX_ATTEMPTS:-3}
+      - AI_FIX_TIMEOUT=${AI_FIX_TIMEOUT:-300}
+      - CI_FIX_BRANCH=ai-fix/${CI_BUILD_NUMBER}
+
+  # ---------------------------------------------------------------------------
+  # Step 4: Verify Fix
+  # ---------------------------------------------------------------------------
+  verify-fix:
+    image: node:20-slim
+    commands:
+      # Run project tests to verify fix
+      - |
+        echo "Verifying AI fix..."
+
+        # Detect and run tests based on project type
+        if [ -f "package.json" ]; then
+          npm ci
+          npm test
+        elif [ -f "Cargo.toml" ]; then
+          cargo test
+        elif [ -f "go.mod" ]; then
+          go test ./...
+        elif [ -f "pyproject.toml" ] || [ -f "setup.py" ]; then
+          pip install -e ".[test]" 2>/dev/null || pip install pytest
+          pytest
+        elif [ -f "Makefile" ] && grep -q '^test:' Makefile; then
+          make test
+        else
+          echo "No test framework detected, skipping verification"
+        fi
+
+    when:
+      - status: success
+
+  # ---------------------------------------------------------------------------
+  # Step 5: Trigger Auto-PR
+  # ---------------------------------------------------------------------------
+  trigger-auto-pr:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache curl jq
+
+      # Read fix result
+      - |
+        if [ -f "/tmp/ai-fix-result.json" ]; then
+          FIX_BRANCH=$(jq -r '.branch' /tmp/ai-fix-result.json)
+          echo "Fix branch: ${FIX_BRANCH}"
+        else
+          FIX_BRANCH="ai-fix/${CI_BUILD_NUMBER}"
+        fi
+
+      # Trigger auto-PR pipeline
+      - |
+        echo "Triggering auto-PR creation..."
+
+        curl -X POST "${CI_SYSTEM_URL}/api/repos/${CI_REPO}/pipelines" \
+          -H "Authorization: Bearer ${CI_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d @- <<EOF
+        {
+          "branch": "${FIX_BRANCH}",
+          "variables": {
+            "PR_SOURCE_BRANCH": "${FIX_BRANCH}",
+            "PR_TARGET_BRANCH": "${CI_COMMIT_BRANCH}",
+            "PR_TITLE": "fix: AI auto-fix for build #${CI_BUILD_NUMBER}",
+            "PR_BODY": "Automated fix generated by AI (${AI_FIX_PROVIDER:-claude-code})",
+            "ISSUE_NUMBER": "${ISSUE_NUMBER:-}",
+            "PIPELINE_EVENT": "auto-pr"
+          }
+        }
+        EOF
+
+    secrets:
+      - CI_TOKEN
+    environment:
+      - AI_FIX_PROVIDER=${AI_FIX_PROVIDER:-claude-code}
+    when:
+      - status: success
+
+  # ---------------------------------------------------------------------------
+  # Step 6: Notify on Failure
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    image: alpine:3.19
+    commands:
+      - apk add --no-cache curl jq
+
+      - |
+        echo "AI Auto-fix failed after all attempts"
+        echo "Manual intervention required"
+
+        # Create a comment on the issue if one exists
+        if [ -n "${ISSUE_NUMBER:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+          REPO_OWNER=$(echo "${CI_REPO}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${CI_REPO}" | cut -d'/' -f2)
+
+          curl -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${ISSUE_NUMBER}/comments" \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d @- <<EOF
+        {
+          "body": "🤖 **AI Auto-fix Failed**\n\nThe automated fix attempt using \`${AI_FIX_PROVIDER:-claude-code}\` was unsuccessful after ${AI_FIX_MAX_ATTEMPTS:-3} attempts.\n\n**Build:** #${CI_BUILD_NUMBER}\n**Pipeline:** [View Pipeline](${CI_PIPELINE_URL})\n\nManual intervention is required."
+        }
+        EOF
+        fi
+
+    secrets:
+      - GITHUB_TOKEN
+    environment:
+      - AI_FIX_PROVIDER=${AI_FIX_PROVIDER:-claude-code}
+      - AI_FIX_MAX_ATTEMPTS=${AI_FIX_MAX_ATTEMPTS:-3}
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Services (if needed)
+# -----------------------------------------------------------------------------
+services:
+  # Docker-in-Docker for running containerized AI tools
+  docker:
+    image: docker:24-dind
+    privileged: true
+    when:
+      evaluate: 'AI_FIX_PROVIDER == "openhands"'

@@ -1,0 +1,266 @@
+# =============================================================================
+# Pipeline Failure Handler
+# =============================================================================
+# This pipeline handles failures from other pipelines by:
+# - Creating GitHub issues automatically
+# - Sending notifications
+# - Collecting failure artifacts
+#
+# Usage: Include these steps in your main pipeline or use as a separate
+#        pipeline triggered on failure.
+#
+# Version: 0.0.6
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Variables
+# -----------------------------------------------------------------------------
+variables:
+  - &alpine_image "alpine:latest"
+  - &curl_image "curlimages/curl:latest"
+
+# -----------------------------------------------------------------------------
+# Failure Handling Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Collect Failure Information
+  # ---------------------------------------------------------------------------
+  collect-failure-info:
+    image: *alpine_image
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "📋 Collecting Failure Information"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      
+      # Create failure report directory
+      - mkdir -p failure-report
+      
+      # Collect environment information
+      - |
+        cat > failure-report/environment.txt << EOF
+        Pipeline Failure Report
+        ========================
+        
+        Repository: ${CI_REPO}
+        Branch: ${CI_COMMIT_BRANCH:-N/A}
+        Tag: ${CI_COMMIT_TAG:-N/A}
+        Commit: ${CI_COMMIT_SHA}
+        Author: ${CI_COMMIT_AUTHOR}
+        Message: ${CI_COMMIT_MESSAGE}
+        
+        Pipeline: #${CI_PIPELINE_NUMBER}
+        Event: ${CI_PIPELINE_EVENT}
+        URL: ${CI_PIPELINE_URL:-N/A}
+        
+        Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        EOF
+      
+      - cat failure-report/environment.txt
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    when:
+      - status: failure
+
+  # ---------------------------------------------------------------------------
+  # Create GitHub Issue
+  # ---------------------------------------------------------------------------
+  create-github-issue:
+    image: alpine:latest
+    secrets:
+      - github_token
+    commands:
+      - echo "📋 Creating GitHub Issue..."
+      
+      # Install required tools
+      - apk add --no-cache curl jq bash
+      
+      # Determine issue template based on failure type
+      - |
+        if [ -n "${FAILED_STEP:-}" ]; then
+          case "${FAILED_STEP}" in
+            *test*|*spec*)
+              TEMPLATE="test-failure"
+              EXTRA_LABELS="tests"
+              ;;
+            *build*)
+              TEMPLATE="build-failure"
+              EXTRA_LABELS="build"
+              ;;
+            *security*|*trivy*|*scan*)
+              TEMPLATE="security-vulnerability"
+              EXTRA_LABELS="security"
+              ;;
+            *)
+              TEMPLATE="pipeline-failure"
+              EXTRA_LABELS=""
+              ;;
+          esac
+        else
+          TEMPLATE="pipeline-failure"
+          EXTRA_LABELS=""
+        fi
+      
+      # Create issue using the script
+      - |
+        if [ -f "scripts/create-issue.sh" ]; then
+          chmod +x scripts/create-issue.sh
+          ./scripts/create-issue.sh \
+            --title "🚨 Pipeline Failed: ${CI_COMMIT_BRANCH:-${CI_COMMIT_TAG:-unknown}} (#${CI_PIPELINE_NUMBER})" \
+            --template "$TEMPLATE" \
+            --labels "ci-failure,automated${EXTRA_LABELS:+,$EXTRA_LABELS}" \
+            --duplicate-check
+        else
+          # Fallback: Create issue directly with curl
+          ISSUE_BODY="## Pipeline Failure
+          
+          | Field | Value |
+          |-------|-------|
+          | Repository | ${CI_REPO} |
+          | Branch | ${CI_COMMIT_BRANCH:-N/A} |
+          | Commit | \`${CI_COMMIT_SHA:0:8}\` |
+          | Pipeline | #${CI_PIPELINE_NUMBER} |
+          
+          Please check the pipeline logs for details."
+          
+          curl -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"title\": \"🚨 Pipeline Failed: ${CI_COMMIT_BRANCH:-unknown} (#${CI_PIPELINE_NUMBER})\",
+              \"body\": $(echo "$ISSUE_BODY" | jq -Rs .),
+              \"labels\": [\"ci-failure\", \"automated\"]
+            }" \
+            "https://api.github.com/repos/${CI_REPO}/issues"
+        fi
+      
+      - echo "✅ GitHub issue created"
+    depends_on:
+      - collect-failure-info
+    when:
+      - status: failure
+      # Only create issues for main branches to avoid noise
+      - branch: [main, master, develop]
+      - event: [push]
+
+  # ---------------------------------------------------------------------------
+  # Notify on Failure (Webhook)
+  # ---------------------------------------------------------------------------
+  notify-webhook:
+    image: *curl_image
+    secrets:
+      - webhook_url
+    commands:
+      - echo "🔔 Sending failure notification..."
+      
+      # Send webhook notification (Slack/Discord compatible)
+      - |
+        if [ -n "${WEBHOOK_URL:-}" ]; then
+          curl -X POST "${WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"username\": \"Woodpecker CI\",
+              \"icon_emoji\": \":x:\",
+              \"text\": \"❌ Pipeline Failed\",
+              \"attachments\": [{
+                \"color\": \"danger\",
+                \"fields\": [
+                  {\"title\": \"Repository\", \"value\": \"${CI_REPO}\", \"short\": true},
+                  {\"title\": \"Branch\", \"value\": \"${CI_COMMIT_BRANCH:-N/A}\", \"short\": true},
+                  {\"title\": \"Commit\", \"value\": \"${CI_COMMIT_SHA:0:8}\", \"short\": true},
+                  {\"title\": \"Author\", \"value\": \"${CI_COMMIT_AUTHOR}\", \"short\": true},
+                  {\"title\": \"Pipeline\", \"value\": \"#${CI_PIPELINE_NUMBER}\", \"short\": true}
+                ]
+              }]
+            }"
+          echo "✅ Webhook notification sent"
+        else
+          echo "⚠️ WEBHOOK_URL not configured, skipping notification"
+        fi
+    depends_on:
+      - collect-failure-info
+    when:
+      - status: failure
+
+  # ---------------------------------------------------------------------------
+  # Archive Failure Artifacts
+  # ---------------------------------------------------------------------------
+  archive-failure-report:
+    image: *alpine_image
+    commands:
+      - echo "📦 Archiving failure report..."
+      
+      # Collect any existing logs or artifacts
+      - |
+        if [ -d "reports" ]; then
+          cp -r reports failure-report/ 2>/dev/null || true
+        fi
+        
+        if [ -d "coverage" ]; then
+          cp -r coverage failure-report/ 2>/dev/null || true
+        fi
+        
+        if [ -f "npm-debug.log" ]; then
+          cp npm-debug.log failure-report/ 2>/dev/null || true
+        fi
+      
+      # Create archive
+      - tar -czf failure-report.tar.gz failure-report/
+      
+      - echo "📁 Failure report archived: failure-report.tar.gz"
+      - ls -la failure-report/
+    depends_on:
+      - collect-failure-info
+    when:
+      - status: failure
+
+  # ---------------------------------------------------------------------------
+  # Summary
+  # ---------------------------------------------------------------------------
+  failure-summary:
+    image: *alpine_image
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "❌ PIPELINE FAILURE HANDLED"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo ""
+      - echo "Actions taken:"
+      - echo "  ✓ Failure information collected"
+      - echo "  ✓ GitHub issue created (if configured)"
+      - echo "  ✓ Notifications sent (if configured)"
+      - echo "  ✓ Failure artifacts archived"
+      - echo ""
+      - echo "Next steps:"
+      - echo "  1. Review the pipeline logs"
+      - echo "  2. Check the GitHub issue for details"
+      - echo "  3. Fix the underlying issue"
+      - echo "  4. Push a new commit to re-run the pipeline"
+      - echo ""
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    depends_on:
+      - create-github-issue
+      - notify-webhook
+      - archive-failure-report
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Integration Example
+# -----------------------------------------------------------------------------
+# To use this in your main pipeline, add these steps after your main steps:
+#
+# steps:
+#   # ... your main steps ...
+#   
+#   on-failure-handler:
+#     image: alpine:latest
+#     commands:
+#       - echo "Triggering failure handler..."
+#     when:
+#       - status: failure
+#
+# Or reference this file in a multi-pipeline setup:
+#
+# .woodpecker/
+#   ├── main.yml
+#   └── on-failure.yml  # This file, triggered on failure
