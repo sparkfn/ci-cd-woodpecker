@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10] - 2026-02-07
+
+### Fixed
+- Pin Woodpecker images to `v3.13.0` (rolling `v3` tag caused server/agent version mismatch)
+- Upgrade from Woodpecker v2 to v3 (v2 `latest` tag pulled buggy v2.8.3)
+- Use `woodpecker-server ping` for healthcheck (distroless image has no wget/curl)
+- Use external `traefik` network only (avoid Docker subnet pool exhaustion)
+- Update data mount path to `/var/lib/woodpecker` (v3 default)
+- Add `command: agent` to agent service (required in v3)
+- Configure Docker daemon address pools (`/24` subnets) to support pipeline network creation
+
+### Validated
+- End-to-end pipeline execution with `whatsappWebJs_frontend` trial
+- GitHub webhook → Woodpecker → clone → install → lint → test → build flow confirmed working
+
 ## [0.0.9] - 2026-02-07
 
 ### Added

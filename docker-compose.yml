@@ -26,7 +26,7 @@ services:
   # Documentation: https://woodpecker-ci.org/docs/administration/server-config
   # ---------------------------------------------------------------------------
   woodpecker-server:
-    image: woodpeckerci/woodpecker-server:v3
+    image: woodpeckerci/woodpecker-server:v3.13.0
     container_name: woodpecker-server
     restart: unless-stopped
     
@@ -106,7 +106,7 @@ services:
   # Documentation: https://woodpecker-ci.org/docs/administration/agent-config
   # ---------------------------------------------------------------------------
   woodpecker-agent:
-    image: woodpeckerci/woodpecker-agent:v3
+    image: woodpeckerci/woodpecker-agent:v3.13.0
     container_name: woodpecker-agent
     command: agent
     restart: unless-stopped
