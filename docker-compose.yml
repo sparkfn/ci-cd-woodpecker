@@ -1,18 +1,19 @@
 # =============================================================================
 # Woodpecker CI/CD - Docker Compose Configuration
 # =============================================================================
-# Version: 0.0.2
-# 
+# Version: 0.0.9
+#
 # This file defines the Woodpecker CI server and agent containers.
-# 
+#
 # Usage:
 #   1. Copy .env.example to .env and configure your values
 #   2. Generate agent secret: openssl rand -hex 32
 #   3. Start services: docker compose up -d
-#   4. Access UI: http://localhost:8000
+#   4. Access UI: https://ci.sparkfn.io (or http://localhost:8090)
 #
 # Prerequisites:
 #   - Docker and Docker Compose v2+
+#   - Traefik reverse proxy running on external "traefik" network
 #   - GitHub OAuth App or GitHub App credentials
 #   - Agent secret configured in .env
 # =============================================================================
@@ -30,10 +31,10 @@ services:
     restart: unless-stopped
     
     ports:
-      # Web UI and API
-      - "${WOODPECKER_SERVER_ADDR:-8000}:8000"
+      # Web UI and API (host:container) — direct access fallback
+      - "${WOODPECKER_SERVER_ADDR:-8090}:8000"
       # gRPC for agent communication
-      - "${WOODPECKER_GRPC_ADDR:-9000}:9000"
+      - "${WOODPECKER_GRPC_ADDR:-9090}:9000"
     
     volumes:
       # Persistent data (database, etc.)
@@ -65,8 +66,8 @@ services:
       # GitHub App configuration (alternative to OAuth)
       - WOODPECKER_GITHUB_APP_ID=${WOODPECKER_GITHUB_APP_ID:-}
       
-      # Open registration (set to false for private instances)
-      - WOODPECKER_OPEN=false
+      # Open registration (set to true for initial setup, then lock down)
+      - WOODPECKER_OPEN=${WOODPECKER_OPEN:-true}
       
       # Logging
       - WOODPECKER_LOG_LEVEL=${LOG_LEVEL:-info}
@@ -74,7 +75,8 @@ services:
     
     networks:
       - woodpecker-network
-    
+      - traefik
+
     # Health check to ensure server is responding
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/healthz"]
@@ -94,6 +96,12 @@ services:
     labels:
       - "com.woodpecker.component=server"
       - "com.woodpecker.version=latest"
+      # Traefik reverse proxy
+      - "traefik.enable=true"
+      - "traefik.http.routers.woodpecker.rule=Host(`ci.sparkfn.io`)"
+      - "traefik.http.routers.woodpecker.entrypoints=websecure"
+      - "traefik.http.routers.woodpecker.tls.certresolver=myresolver"
+      - "traefik.http.services.woodpecker.loadbalancer.server.port=8000"
 
   # ---------------------------------------------------------------------------
   # Woodpecker Agent
@@ -166,17 +174,5 @@ networks:
   woodpecker-network:
     name: woodpecker-network
     driver: bridge
-    # Enable IPv6 if needed
-    # ipam:
-    #   config:
-    #     - subnet: "172.28.0.0/16"
-
-# =============================================================================
-# Volumes (optional - for named volumes instead of bind mounts)
-# =============================================================================
-# Uncomment to use Docker named volumes instead of bind mounts
-# volumes:
-#   woodpecker-data:
-#     name: woodpecker-data
-#   woodpecker-logs:
-#     name: woodpecker-logs
+  traefik:
+    external: true
