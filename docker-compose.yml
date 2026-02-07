@@ -74,12 +74,11 @@ services:
       - WOODPECKER_LOG_FILE=/logs/woodpecker-server.log
     
     networks:
-      - woodpecker-network
       - traefik
 
     # Health check to ensure server is responding
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/healthz"]
+      test: ["CMD", "/bin/woodpecker-server", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -145,7 +144,7 @@ services:
       - WOODPECKER_LOG_LEVEL=${LOG_LEVEL:-info}
     
     networks:
-      - woodpecker-network
+      - traefik
     
     # Health check - verify agent can connect to server
     healthcheck:
@@ -171,8 +170,5 @@ services:
 # Networks
 # =============================================================================
 networks:
-  woodpecker-network:
-    name: woodpecker-network
-    driver: bridge
   traefik:
     external: true
