@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-02-08
+
+### Added
+- Webhook handler Docker service (`docker/webhook-handler/Dockerfile`)
+- Traefik `/webhooks` route to webhook-handler container (priority 200, StripPrefix middleware)
+- Webhook deploy pipeline trigger on Dockerfile changes
+- Webhook log persistence directory (`data/logs/webhook/`)
+
+### Changed
+- Traefik priority labels: woodpecker-server `100`, webhook-handler `200`
+- `.env.example`: updated `WEBHOOK_ENDPOINT` default to `https://ci.sparkfn.io/webhooks`, added `WEBHOOK_PORT`, `WOODPECKER_TOKEN`, `WEBHOOK_VERBOSE`
+- `docs/WEBHOOKS.md`: added Docker deployment section, updated payload URLs, updated architecture diagram
+
 ## [0.0.11] - 2026-02-07
 
 ### Fixed

@@ -1,6 +1,6 @@
 # Webhook & Polling Guide
 
-> Version: 0.0.10 | Last Updated: 2026-02-07
+> Version: 0.0.12 | Last Updated: 2026-02-08
 
 This guide covers webhook handling and polling services for CI/CD automation with Woodpecker.
 
@@ -36,11 +36,18 @@ Two methods are available for detecting repository events:
           ┌───────────────┴───────────────┐
           │                               │
           ▼                               ▼
-┌─────────────────────┐       ┌─────────────────────┐
-│   Webhook Handler   │       │   Polling Service   │
-│   (webhook-handler) │       │   (poll-service)    │
-│   Port 9000         │       │   Every 60s         │
-└─────────┬───────────┘       └─────────┬───────────┘
+┌─────────────────────────┐   ┌─────────────────────┐
+│   Traefik (HTTPS)       │   │   Polling Service   │
+│   ci.sparkfn.io         │   │   (poll-service)    │
+│   /webhooks → :9000     │   │   Every 60s         │
+└─────────┬───────────────┘   └─────────┬───────────┘
+          │                             │
+          ▼                             │
+┌─────────────────────────┐             │
+│   Webhook Handler       │             │
+│   (Docker container)    │             │
+│   Port 9000             │             │
+└─────────┬───────────────┘             │
           │                             │
           └──────────────┬──────────────┘
                          │
@@ -83,7 +90,7 @@ cat payload.json | ./scripts/webhook-handler.sh --stdin
 1. Go to your repository → Settings → Webhooks → Add webhook
 
 2. Configure:
-   - **Payload URL**: `https://your-server.com:9000/webhook`
+   - **Payload URL**: `https://ci.sparkfn.io/webhooks`
    - **Content type**: `application/json`
    - **Secret**: Your webhook secret
    - **Events**: Select events to trigger on:
@@ -98,7 +105,7 @@ cat payload.json | ./scripts/webhook-handler.sh --stdin
 1. Go to project → Settings → Webhooks
 
 2. Configure:
-   - **URL**: `https://your-server.com:9000/webhook`
+   - **URL**: `https://ci.sparkfn.io/webhooks`
    - **Secret token**: Your webhook secret
    - **Trigger**: Push events, Merge request events, Tag push events
 
@@ -142,6 +149,40 @@ WantedBy=multi-user.target
 sudo systemctl enable webhook-handler
 sudo systemctl start webhook-handler
 ```
+
+### Docker Deployment (Recommended)
+
+The webhook handler runs as a Docker Compose service alongside Woodpecker, with Traefik routing `https://ci.sparkfn.io/webhooks` to the container.
+
+```bash
+# Build and start
+docker compose up -d --build webhook-handler
+
+# View logs
+docker compose logs -f webhook-handler
+
+# Restart after config changes (no rebuild needed — scripts are bind-mounted)
+docker compose restart webhook-handler
+
+# Check health
+curl -f https://ci.sparkfn.io/webhooks/health
+```
+
+**How it works:**
+
+- Traefik listens on `ci.sparkfn.io` and routes `/webhooks/*` to the container on port 9000
+- The `/webhooks` prefix is stripped by a StripPrefix middleware, so the container sees `/health`, `/webhook`, etc.
+- Scripts (`./scripts/`) and config (`./config/`) are bind-mounted read-only — edit on host, restart the container
+- Logs are written to `./data/logs/webhook/` on the host
+
+**Environment variables** are set via `.env` — see `.env.example` for the full list. Key variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WEBHOOK_PORT` | Container listen port | `9000` |
+| `WEBHOOK_SECRET` | Signature validation secret | — |
+| `WOODPECKER_TOKEN` | Woodpecker API token | — |
+| `WEBHOOK_VERBOSE` | Enable debug logging | `false` |
 
 ---
 
@@ -421,7 +462,7 @@ server {
 3. **Check firewall rules** allow incoming connections on webhook port
 4. **Test with curl**:
    ```bash
-   curl -X POST http://your-server:9000/webhook \
+   curl -X POST https://ci.sparkfn.io/webhooks \
      -H "Content-Type: application/json" \
      -d '{"test": true}'
    ```
@@ -491,7 +532,9 @@ cat /var/lib/poll-service/state.json | python3 -m json.tool
 |------|---------|
 | `scripts/webhook-handler.sh` | Webhook receiver and processor |
 | `scripts/poll-service.sh` | Polling service for change detection |
+| `docker/webhook-handler/Dockerfile` | Container image for webhook handler |
 | `pipelines/on-merge.yml` | Pipeline triggered on PR merge |
+| `pipelines/webhook-listener.yml` | Deploy pipeline for webhook handler |
 | `config/webhook.yaml` | Webhook and polling configuration |
 | `docs/WEBHOOKS.md` | This documentation |
 
