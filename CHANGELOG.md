@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-09-21
+
+### Changed
+- Upgrade Woodpecker server and agents from `v3.13.0` to `v3.18.1`
+
+### Notes
+- v3.18.0 ships a one-time log-storage migration (`deduplicate-log-entries`); the server applies it on first start
+
 ## [0.0.12] - 2026-02-08
 
 ### Added
