@@ -1,0 +1,143 @@
+# =============================================================================
+# Woodpecker CI/CD - Webhook Listener Deploy Pipeline
+# Version: 0.0.12
+#
+# Watches the prod branch for changes to webhook-related files and deploys
+# the webhook-handler service via docker compose on the target server.
+#
+# Trigger: Push to prod branch (auto) or manual
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Pipeline Variables
+# -----------------------------------------------------------------------------
+variables:
+  - &deploy_image "alpine:3.19"
+
+# -----------------------------------------------------------------------------
+# Clone Settings
+# -----------------------------------------------------------------------------
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      depth: 1
+
+# -----------------------------------------------------------------------------
+# Pipeline Steps
+# -----------------------------------------------------------------------------
+steps:
+  # ---------------------------------------------------------------------------
+  # Stage 1: Validate
+  # ---------------------------------------------------------------------------
+  - name: validate
+    image: *deploy_image
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Webhook Listener Deploy Pipeline"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Repository  ${CI_REPO}"
+      - echo "Branch      ${CI_COMMIT_BRANCH}"
+      - echo "Commit      ${CI_COMMIT_SHA:0:8}"
+      - echo "Author      ${CI_COMMIT_AUTHOR}"
+      - echo "Pipeline    #${CI_PIPELINE_NUMBER}"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: Deploy webhook-handler via docker compose
+  # ---------------------------------------------------------------------------
+  - name: deploy-webhook-handler
+    image: *deploy_image
+    commands:
+      - apk add --no-cache openssh-client
+      - mkdir -p ~/.ssh
+      - echo "$SSH_KEY" > ~/.ssh/id_rsa
+      - chmod 600 ~/.ssh/id_rsa
+      - ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+      - |
+        ssh -o StrictHostKeyChecking=no "$DEPLOY_USER@$DEPLOY_HOST" << 'REMOTE'
+          set -euo pipefail
+          cd ${DEPLOY_PATH:-/home/docker/ci-cd-woodpecker}
+          echo "Pulling latest changes..."
+          git pull origin prod
+          echo "Rebuilding and restarting webhook-handler..."
+          docker compose up -d --build --force-recreate webhook-handler
+          echo "Deploy complete."
+        REMOTE
+    secrets:
+      - ssh_key
+      - deploy_host
+      - deploy_user
+      - deploy_path
+    environment:
+      DEPLOY_PATH:
+        from_secret: deploy_path
+
+  # ---------------------------------------------------------------------------
+  # Stage 3: Health check
+  # ---------------------------------------------------------------------------
+  - name: health-check
+    image: *deploy_image
+    commands:
+      - apk add --no-cache curl
+      - |
+        echo "Waiting for webhook-handler to become healthy..."
+        max_attempts=12
+        attempt=0
+        while [ $attempt -lt $max_attempts ]; do
+          if curl -sf "${HEALTH_URL}" > /dev/null 2>&1; then
+            echo "Webhook handler is healthy"
+            exit 0
+          fi
+          attempt=$((attempt + 1))
+          echo "Attempt $attempt/$max_attempts - waiting 5s..."
+          sleep 5
+        done
+        echo "Health check failed after $max_attempts attempts"
+        exit 1
+    environment:
+      HEALTH_URL: ${WEBHOOK_HEALTH_URL:-https://ci.sparkfn.io/webhooks/health}
+
+  # ---------------------------------------------------------------------------
+  # Notifications
+  # ---------------------------------------------------------------------------
+  - name: notify-success
+    image: *deploy_image
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Webhook handler deployed successfully"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    when:
+      - status: success
+
+  - name: notify-failure
+    image: *deploy_image
+    commands:
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Webhook handler deployment FAILED"
+      - echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - echo "Check the logs above for error details."
+    when:
+      - status: failure
+
+# -----------------------------------------------------------------------------
+# Labels
+# -----------------------------------------------------------------------------
+labels:
+  type: deployment
+  service: webhook-handler
+
+# -----------------------------------------------------------------------------
+# When to run this pipeline
+# -----------------------------------------------------------------------------
+when:
+  - event: push
+    branch: prod
+    path:
+      include:
+        - scripts/webhook-handler.sh
+        - config/webhook.yaml
+        - docker-compose.yml
+        - docker/webhook-handler/Dockerfile
+        - pipelines/webhook-listener.yml
+  - event: manual

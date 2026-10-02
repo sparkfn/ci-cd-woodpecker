@@ -6,10 +6,15 @@
 # Data directories (keep structure with .gitkeep)
 data/*
 !data/.gitkeep
+!data/woodpecker/
 data/woodpecker/*
 !data/woodpecker/.gitkeep
+!data/logs/
 data/logs/*
 !data/logs/.gitkeep
+!data/logs/webhook/
+data/logs/webhook/*
+!data/logs/webhook/.gitkeep
 
 # IDE
 .idea/
